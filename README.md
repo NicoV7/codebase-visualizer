@@ -1,6 +1,12 @@
 # codebase-visualizer
 
-Turn any codebase into a **queryable, visualizable code graph**: every function traced to its callers and callees, libraries as separate components, line-level PR diff overlays, linked plain-language component descriptions, and a reasoning log for *why* code exists or changed.
+**Bridge the gap between AI-generated code and the engineer who has to own it.** Turn any codebase into a queryable, visualizable code graph — then *review what the AI built* with a guided walkthrough, a persistent understanding ledger, and a comprehension heatmap that makes never-reviewed code visibly warm until a human owns it.
+
+```bash
+codegraph review --base main    # walk what the AI just built, stop by stop
+```
+
+Each stop: the plain-language WHAT, the agent's recorded WHY, the actual code and diff, callers/callees — highlighted live in the 3D city. "Got it" marks are hash-bound: if the code changes again, your understanding expires with it. The header tracks **% understood**; the heatmap shows exactly where comprehension debt lives.
 
 Ships three surfaces over one graph:
 

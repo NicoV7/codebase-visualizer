@@ -54,6 +54,15 @@
   .tracestep { padding: .25rem .4rem; opacity: .55; cursor: pointer; }
   .tracestep.on { opacity: 1; font-weight: 700; background: var(--panel); border-left: 3px solid var(--ink); }
   .hint { font-size: 9px; opacity: .55; margin-top: .6rem; line-height: 1.6; }
+  .stopbadge { display: inline-block; font-size: 9px; letter-spacing: .1em; padding: .1rem .4rem;
+    border: 1px solid var(--ink); margin-left: .4rem; }
+  .stopbadge.context { opacity: .6; }
+  pre.snippet { font-size: 10px; background: #00000010; padding: .5rem; overflow: auto;
+    max-height: 260px; line-height: 1.45; margin: .5rem 0; }
+  pre.snippet.hunks { max-height: 180px; }
+  .gap { border: 1.5px dashed #8b2e2e; padding: .5rem; color: #8b2e2e; margin: .4rem 0; }
+  .gotit { width: 100%; margin-top: .6rem; padding: .55rem; font-size: 11px; }
+  .stale { color: #8b6a2e; font-size: 9px; letter-spacing: .1em; }
 </style>
 </head>
 <body>
@@ -67,6 +76,7 @@
   <button id="btn-flow">pause flow</button>
   <button id="btn-calls" class="on">calls</button>
   <button id="btn-imports" class="on">imports</button>
+  <button id="btn-heat" style="display:none">comprehension</button>
   <button id="btn-trace">trace one step</button>
   <button id="btn-collapse">collapse all</button>
   <button id="btn-reset">reset view</button>
@@ -154,6 +164,12 @@
   let traceStep = -1;
   let flowing = true;
   let showCalls = true, showImports = true;
+  const REV = D.review || null;
+  const WT = REV && REV.walkthrough || null;
+  let undStates = { ...(REV?.understanding?.states || {}) };  // sid -> walked|owned
+  let undPercent = REV?.understanding?.percent ?? null;
+  let undUnreviewed = REV?.understanding?.counts?.unreviewed ?? null;
+  let heatmapOn = false, reviewIdx = 0, inTour = !!WT;
 
   // symbol index -> file path, for aggregating symbol edges to file wiring
   const symFile = {}, symComp = {};
@@ -330,13 +346,56 @@
       m4.makeScale(Math.max(c.w, 0.01) * 1.06 + 0.05, Math.max(c.h, 0.01) * 1.03 + 0.03, Math.max(c.d, 0.01) * 1.06 + 0.05);
       m4.setPosition(c.x, c.y - 0.012, c.z);
       outline.setMatrixAt(i, m4);
-      const col = hl ? e.color.clone().lerp(new T.Color("#ffffff"), 0.35) : e.color;
-      mesh.setColorAt(i, col);
+      mesh.setColorAt(i, colorFor(e, hl));
     }
     mesh.instanceMatrix.needsUpdate = true;
     outline.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }
+  // ---------- comprehension heatmap ----------
+  const symLoc = {};
+  for (const s of D.structures) for (const f of s.children?.files || []) for (const sym of f.symbols) symLoc[sym.i] = sym.loc;
+  let compHeat = {};
+  function recomputeHeat() {
+    compHeat = {};
+    const acc = {};
+    for (const iStr in symLoc) {
+      const i = +iStr, comp = symComp[i];
+      const a = acc[comp] = acc[comp] || { got: 0, tot: 0 };
+      const st = undStates[SYM[i]];
+      a.tot += symLoc[i];
+      if (st === "walked") a.got += symLoc[i] * 0.6;
+      if (st === "owned") a.got += symLoc[i];
+    }
+    for (const comp in acc) compHeat[comp] = acc[comp].tot ? acc[comp].got / acc[comp].tot : 1;
+  }
+  recomputeHeat();
+  function colorFor(e, hl) {
+    if (hl) return e.color.clone().lerp(new T.Color("#ffffff"), 0.35);
+    if (!heatmapOn || !REV) return e.color;
+    let heat;  // 0 = unreviewed (warm), 1 = owned (calm zone color)
+    if (e.type === "symbol") {
+      const st = undStates[SYM[e.symIdx]];
+      heat = st === "owned" ? 1 : st === "walked" ? 0.6 : 0;
+    } else if (e.type === "component" || e.type === "file") {
+      heat = compHeat[e.comp] ?? 1;
+    } else return e.color;
+    return WARM.clone().lerp(e.color, heat);
+  }
+  function updateHeader(summary) {
+    if (summary) {
+      undStates = { ...summary.states };
+      undPercent = summary.percent;
+      undUnreviewed = summary.counts.unreviewed;
+      recomputeHeat();
+    }
+    const el = document.getElementById("st-und-v");
+    if (el && undPercent != null) {
+      el.textContent = undPercent + "%";
+      document.getElementById("st-und-n").textContent = undUnreviewed + " unreviewed";
+    }
+  }
+
   function isSelected(e) {
     if (!selected) return false;
     if (selected.type === "component") return e.type === "component" && e.comp === selected.comp;
@@ -656,7 +715,9 @@
       ? `<div class="diffbadge"><span class="add">+${s.diff.added}</span> <span class="del">-${s.diff.removed}</span> lines in this diff</div>` : "";
     const reasonsHtml = reasons.length
       ? `<div class="railhead">WHY (reasoning log)</div>` + reasons.map(r => `<div style="margin:.3rem 0">· ${r.why} <span style="opacity:.5">(${r.kind})</span></div>`).join("") : "";
+    inTour = false;
     panel.innerHTML = `
+      ${WT ? `<button id="rv-back" style="margin-bottom:.5rem">← back to tour</button>` : ""}
       <div class="zone">${zoneLabel}</div>
       <h2>${title}</h2>
       ${diffHtml}
@@ -666,6 +727,8 @@
       ${reasonsHtml}
       <div class="railhead">TRACE</div>
       <div id="tracelist"></div>`;
+    const back = panel.querySelector("#rv-back");
+    if (back) back.onclick = () => renderStop(reviewIdx);
     panel.querySelectorAll("[data-imp]").forEach(el => el.onclick = () => {
       const target = el.dataset.imp;
       if (byId[target]) { select({ type: "component", comp: target }); flyTo(target); }
@@ -792,6 +855,107 @@
     rebuildEntities(); history.replaceState(null, "", location.pathname);
     setCameraHome(); renderTrace();
   };
+  // ---------- review mode (guarded: no D.review, no behavior change) ----------
+  if (REV) {
+    const stat = document.createElement("div");
+    stat.className = "stat";
+    stat.innerHTML = `<b id="st-und-v"></b><span id="st-und-n"></span> understood`;
+    document.querySelector("header .spacer").before(stat);
+    updateHeader(null);
+    const heatBtn = document.getElementById("btn-heat");
+    heatBtn.style.display = "";
+    heatBtn.onclick = () => {
+      heatmapOn = !heatmapOn;
+      heatBtn.classList.toggle("on", heatmapOn);
+    };
+  }
+  async function postUnderstanding(sid, state) {
+    if (!REV?.served) return null;
+    try {
+      const resp = await fetch("/api/understanding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Codegraph": "1" },
+        body: JSON.stringify({ symbol_id: sid, state }),
+      });
+      if (!resp.ok) return null;
+      return await resp.json();
+    } catch { return null; }
+  }
+  function renderStop(i) {
+    if (!WT || !WT.stops.length) return;
+    reviewIdx = Math.max(0, Math.min(i, WT.stops.length - 1));
+    inTour = true;
+    const stop = WT.stops[reviewIdx];
+    const st = undStates[stop.symbol_id];
+    const snippetHtml = stop.snippet.lines.length
+      ? `<pre class="snippet">${stop.snippet.lines.map((l, k) =>
+          `${String((stop.line_start || 1) + k).padStart(4)} ${l.replace(/&/g, "&amp;").replace(/</g, "&lt;")}`
+        ).join("\n")}${stop.snippet.truncated ? `\n… +${stop.snippet.total - stop.snippet.shown} more lines` : ""}</pre>` : "";
+    const diffHtml = stop.diff
+      ? `<div class="diffbadge"><span class="add">+${stop.diff.added}</span> <span class="del">-${stop.diff.removed}</span> lines changed</div>`
+        + `<pre class="snippet hunks">${stop.diff.hunks.map(h => h.replace(/&/g, "&amp;").replace(/</g, "&lt;")).join("\n")}${
+            stop.diff.hunks_total > stop.diff.hunks.length ? `\n… +${stop.diff.hunks_total - stop.diff.hunks.length} more hunks` : ""}</pre>` : "";
+    const whatHtml = stop.gap
+      ? `<div class="gap">unexplained — ask your agent to describe this symbol</div>`
+      : `<div class="body">${stop.what.replace(/</g, "&lt;")}</div>${stop.what_stale ? `<div class="stale">DESCRIPTION PREDATES LATEST CHANGE</div>` : ""}`;
+    const reasonsHtml = stop.reasons.length
+      ? `<div class="railhead">WHY</div>` + stop.reasons.map(r => `<div style="margin:.3rem 0">· ${r.why.replace(/</g, "&lt;")} <span style="opacity:.5">(${r.kind})</span></div>`).join("") : "";
+    const neigh = (label, items, total) => items.length
+      ? `<div class="railhead">${label}${total > items.length ? ` (${items.length} of ${total})` : ""}</div>`
+        + items.map(n => `<div class="railitem" data-nav="${n.id}"><span class="code">→</span><span>${n.name}</span></div>`).join("") : "";
+    panel.innerHTML = `
+      <div class="zone">STOP ${stop.seq}/${WT.stops.length}${WT.truncated ? ` · showing ${WT.stops.length} of ${WT.stops_total}` : ""}
+        <span class="stopbadge ${stop.kind}">${stop.kind === "changed" ? "CHANGED" : "CONTEXT — impacted caller"}</span></div>
+      <h2>${stop.name}</h2>
+      <div class="zone">${stop.component} · ${st === "owned" ? "OWNED" : st === "walked" ? "WALKED" : "UNREVIEWED"}</div>
+      ${whatHtml}
+      ${reasonsHtml}
+      ${diffHtml}
+      ${snippetHtml}
+      ${neigh("CALLED BY", stop.callers, stop.callers_total)}
+      ${neigh("CALLS", stop.callees, stop.callees_total)}
+      <button class="gotit" id="rv-gotit" ${REV.served ? "" : "disabled"}>got it → next</button>
+      <button class="gotit" id="rv-own" ${REV.served ? "" : "disabled"}>owned (i could explain this)</button>
+      ${REV.served ? "" : `<div class="hint">static export — run codegraph review to record understanding</div>`}
+      <div style="display:flex;gap:.4rem;margin-top:.5rem">
+        <button id="rv-prev">← prev</button><button id="rv-next">next →</button><button id="rv-show">show in city</button>
+      </div>`;
+    panel.querySelector("#rv-gotit").onclick = async () => {
+      updateHeader(await postUnderstanding(stop.symbol_id, "walked"));
+      renderStop(reviewIdx + 1);
+    };
+    panel.querySelector("#rv-own").onclick = async () => {
+      updateHeader(await postUnderstanding(stop.symbol_id, "owned"));
+      renderStop(reviewIdx);
+    };
+    panel.querySelector("#rv-prev").onclick = () => renderStop(reviewIdx - 1);
+    panel.querySelector("#rv-next").onclick = () => renderStop(reviewIdx + 1);
+    panel.querySelector("#rv-show").onclick = () => showStopInCity(stop);
+    panel.querySelectorAll("[data-nav]").forEach(el => el.onclick = () => {
+      const target = WT.stops.findIndex(s => s.symbol_id === el.dataset.nav);
+      if (target >= 0) renderStop(target);
+    });
+    history.replaceState(null, "", "#review=" + (reviewIdx + 1));
+  }
+  function showStopInCity(stop) {
+    const comp = byId[stop.component];
+    if (!comp) return;
+    const i = SYM.indexOf(stop.symbol_id);
+    const inChildren = i >= 0 && (comp.children?.files || []).some(f => f.symbols.some(x => x.i === i));
+    if (inChildren) {
+      const f = comp.children.files.find(f => f.symbols.some(x => x.i === i));
+      expanded.add(stop.component); expandedFiles.add(stop.component + "::" + f.path);
+      rebuildEntities();
+      selected = { type: "symbol", comp: stop.component, filePath: f.path, symIdx: i };
+      _dim(); refreshLabels();
+    } else {
+      // capped out of children: component focus is the honest fallback
+      selected = { type: "component", comp: stop.component };
+      _dim(); refreshLabels();
+    }
+    flyTo(stop.component, Math.max(camera.zoom, inChildren ? 4.8 : 2.6));
+  }
+
   function setCameraHome() {
     camera.position.set(60, 60 * Math.tan(35.26 * Math.PI / 180) * 1.414, 60);
     camera.zoom = 1.15;
@@ -804,6 +968,10 @@
   setCameraHome();
   rebuildEntities();
   applyHash();
+  if (WT && WT.stops.length) {
+    const m = location.hash.match(/review=(\d+)/);
+    renderStop(m ? +m[1] - 1 : 0);
+  }
   let lastNow = performance.now(), firstFrame = true;
   function frame(now) {
     const dt = now - lastNow; lastNow = now;
@@ -830,6 +998,12 @@
     edgeStats: () => ({ ...edgeStats }),
     toggleCalls: () => document.getElementById("btn-calls").click(),
     toggleImports: () => document.getElementById("btn-imports").click(),
+    reviewState: () => ({ stop: reviewIdx + 1, total: WT ? WT.stops.length : 0, inTour }),
+    reviewNext: () => renderStop(reviewIdx + 1),
+    reviewGotIt: () => document.getElementById("rv-gotit")?.click(),
+    toggleHeatmap: () => document.getElementById("btn-heat").click(),
+    understandingOf: sid => undStates[sid] || "unreviewed",
+    percentUnderstood: () => undPercent,
   };
 })();
 </script>

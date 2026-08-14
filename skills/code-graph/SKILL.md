@@ -26,6 +26,17 @@ Use the `code-graph` MCP tools (or the `codegraph` CLI) instead of grepping when
 - Before explaining a component, check `describe_component(symbol_id)`; write missing ones with `set_description` following `describe-style.md` in this directory. Use `list_undescribed` to drive a describe-the-codebase loop.
 - When you add, change, or explain non-obvious code, log the why: `record_reason(symbol_id, why, kind=exists|changed)`. Read history with `why_trace`.
 
+## After you build anything (the comprehension contract)
+
+The engineer must come out understanding what you built. For every new or changed symbol:
+
+1. `set_description(symbol_id, ...)` per `describe-style.md` — what it does, in their words not yours.
+2. `record_reason(symbol_id, why, kind="changed")` — the non-obvious WHY that the code cannot say.
+3. Tell them: run `codegraph review --base <ref>` — a guided walkthrough of what you built, stop by stop, with a persistent understanding ledger and a comprehension heatmap on the city.
+4. Alternatively run the tour conversationally: `build_walkthrough(base)` → present each stop's WHAT/WHY/code → `mark_understood(symbol_id)` only after they confirm. Check `get_comprehension()` to see what they still have not reviewed — and say so.
+
+Never mark a symbol understood the engineer has not actually confirmed.
+
 ## What good looks like
 
-An answer that cites graph facts (callers, spans, edge counts) rather than guesses, links components by their `codegraph://` IDs, and leaves behind descriptions and reasons the next agent can reuse.
+An answer that cites graph facts (callers, spans, edge counts) rather than guesses, links components by their `codegraph://` IDs, and leaves behind descriptions, reasons, and an honest understanding ledger the next agent (and the human) can trust.

@@ -1,6 +1,6 @@
 [project]
 name = "codebase-visualizer"
-version = "0.1.0"
+version = "0.3.0"
 description = "Turn any codebase into a queryable, visualizable code graph: call traces, PR diff overlays, linked component descriptions, and reasoning logs. CLI + MCP server + isometric map."
 readme = "README.md"
 license = { file = "LICENSE" }

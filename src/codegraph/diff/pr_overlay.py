@@ -41,8 +41,13 @@ class DiffOverlay:
 
 
 def git_diff(project_root: str, base: str, head: str = "HEAD") -> str:
+    # --relative: paths come out relative to project_root even when it is a
+    # subdirectory of the git repo, matching the graph's span keys.
+    # head=HEAD compares the working tree against base (three-dot would
+    # exclude uncommitted work — exactly what a review must include).
+    rev = base if head == "HEAD" else f"{base}...{head}"
     proc = subprocess.run(
-        ["git", "-C", project_root, "diff", f"{base}...{head}"],
+        ["git", "-C", project_root, "diff", "--relative", rev],
         capture_output=True,
         text=True,
         timeout=120,

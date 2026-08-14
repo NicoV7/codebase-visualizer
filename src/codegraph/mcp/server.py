@@ -99,4 +99,29 @@ def build_server(project_root: str) -> FastMCP:
         """Read the reasoning log for a symbol or trace id."""
         return [vars(r) for r in svc.why(symbol_or_trace_id)]
 
+    @mcp.tool()
+    def get_comprehension() -> dict[str, Any]:
+        """Repo understanding state: % understood, counts, unreviewed symbols.
+
+        Use this to tell the engineer what they have not reviewed yet."""
+        result = svc.comprehension()
+        result["unreviewed"] = result["unreviewed"][:100]
+        return result
+
+    @mcp.tool()
+    def build_walkthrough(base: str | None = None, all_scope: bool = False) -> dict[str, Any]:
+        """Ordered comprehension stops for a diff (or whole repo) — run the
+        tour conversationally: present each stop's WHAT/WHY/code, then
+        mark_understood when the engineer confirms."""
+        return svc.build_walkthrough(base=base, all_scope=all_scope)
+
+    @mcp.tool()
+    def mark_understood(symbol_id: str, state: str = "walked") -> dict[str, Any]:
+        """Record that the engineer walked through (or owns) a symbol.
+
+        Only call after they actually confirmed understanding — this ledger
+        is their comprehension record, not a checkbox."""
+        entry = svc.mark_understood(symbol_id, state)
+        return {"recorded": vars(entry), "comprehension": svc.comprehension()}
+
     return mcp

@@ -187,6 +187,41 @@ def ui(
 
 
 @app.command()
+def review(
+    base: str = typer.Option(None, "--base", help="Walk the diff vs this ref (default scope)"),
+    all_scope: bool = typer.Option(False, "--all", help="Whole-repo onboarding tour"),
+    port: int = typer.Option(0, "--port", help="0 = auto"),
+    root: str = typer.Option(".", "--root"),
+    no_open: bool = typer.Option(False, "--no-open"),
+):
+    """Guided walkthrough of what was built: understand it, then own it."""
+    from codegraph.review.server import ReviewServer
+
+    svc = _service(root)
+    try:
+        walkthrough = svc.build_walkthrough(base=base, all_scope=all_scope)
+        if not walkthrough["stops"]:
+            typer.echo("nothing to review: no changed symbols" + (f" vs {base}" if base else ""))
+            raise typer.Exit(0)
+        html = svc.render_city3d(base=base, review={"served": True, "walkthrough": walkthrough})
+        server = ReviewServer(svc, html, port=port)
+    except Exception as exc:
+        _fail(exc)
+    typer.echo(f"review: {walkthrough['shown']} stop(s)"
+               + (f" of {walkthrough['stops_total']} (truncated)" if walkthrough["truncated"] else ""))
+    typer.echo(server.url)
+    if not no_open:
+        webbrowser.open(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        pct = svc.comprehension()
+        typer.echo(f"\nunderstood: {pct['percent']}% · {pct['counts']['unreviewed']} unreviewed")
+
+
+@app.command()
 def doctor(root: str = typer.Option(".", "--root")):
     """Check the engine, overlay stores, and template."""
     try:
