@@ -70,6 +70,24 @@ class TestDetailPayload:
         assert blob["symbols_total"] == MAX_SYMBOLS_PER_FILE + 15
         assert big["children"]["truncated"] is True
 
+    def test_per_file_imports_attribute_to_the_importing_file(self):
+        # Arrange: a file node importing an external module
+        graph = _graph()
+        graph.nodes.append(
+            Node(id="core/logic.py::<file>", kind="file", name="logic.py", path="/repo/core/logic.py")
+        )
+        graph.nodes.append(Node(id="lib::sample_pkg", kind="library", name="sample_pkg", is_external=True))
+        graph.edges.append(Edge(src="core/logic.py::<file>", dst="lib::sample_pkg", kind="uses_library"))
+        # Act
+        data = build_city_data(graph, "/repo", title="t", detail=True)
+        # Assert
+        core = next(s for s in data["structures"] if s["id"] == "core")
+        logic = next(f for f in core["children"]["files"] if f["path"] == "core/logic.py")
+        assert logic["imports"] == ["lib/sample_pkg"]
+        assert logic["imports_total"] == 1
+        other = next(f for f in core["children"]["files"] if f["path"] == "core/other.py")
+        assert other["imports"] == []
+
     def test_detail_false_omits_detail_fields(self):
         data = build_city_data(_graph(), "/repo", title="t", detail=False)
         assert "symbol_index" not in data

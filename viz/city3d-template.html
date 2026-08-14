@@ -65,6 +65,8 @@
   <div class="stat" id="st-diff" style="display:none"><b id="st-diff-v"></b>diff</div>
   <div class="spacer"></div>
   <button id="btn-flow">pause flow</button>
+  <button id="btn-calls" class="on">calls</button>
+  <button id="btn-imports" class="on">imports</button>
   <button id="btn-trace">trace one step</button>
   <button id="btn-collapse">collapse all</button>
   <button id="btn-reset">reset view</button>
@@ -118,7 +120,7 @@
   const scene = new T.Scene();
   const PAPER = new T.Color("#d6d2b8");
   scene.background = PAPER;
-  scene.fog = new T.Fog(PAPER, 120, 320);
+  scene.fog = new T.Fog(PAPER, 250, 600);
   const camera = new T.OrthographicCamera(-1, 1, 1, -1, -500, 1000);
   camera.zoom = 1.15;
   const controls = new T.OrbitControls(camera, renderer.domElement);
@@ -148,11 +150,21 @@
   const expanded = new Set();          // component ids
   const expandedFiles = new Set();     // `${comp}::${path}`
   let selected = null;                 // {type, comp, filePath?, symIdx?}
+  let hovered = null;                  // entity under the pointer
   let traceStep = -1;
   let flowing = true;
+  let showCalls = true, showImports = true;
+
+  // symbol index -> file path, for aggregating symbol edges to file wiring
+  const symFile = {}, symComp = {};
+  for (const s of D.structures) {
+    for (const f of s.children?.files || []) {
+      for (const sym of f.symbols) { symFile[sym.i] = f.path; symComp[sym.i] = s.id; }
+    }
+  }
 
   // ---------- layout: shelf-packed zone bands in world units ----------
-  const COMP_W = 2.4, GAP = 1.1, ROW_W = 34;
+  const COMP_W = 2.4, GAP = 2.6, LIB_GAP = 1.2;
   function fileCellSide(comp, file) {
     const key = comp.id + "::" + file.path;
     if (!expandedFiles.has(key)) return 1.7;
@@ -175,21 +187,25 @@
     return { w: Math.max(w, 2.5), d: z + rowH + 0.6, filePos };
   }
   function layout() {
-    const counts = {};
     const targets = {};
+    // square-ish overall footprint: row width follows total area, not a constant
+    let totalArea = 0;
+    const fps = {};
+    for (const s of D.structures) { fps[s.id] = compFootprint(s); totalArea += (fps[s.id].w + GAP) * (fps[s.id].d + GAP); }
+    const rowW = Math.max(36, Math.ceil(Math.sqrt(totalArea) * 1.15));
     let bandZ = 0;
     for (const zone of zoneOrder) {
       const items = D.structures.filter(s => s.zone === zone);
       if (!items.length) continue;
-      let x = 0, z = bandZ, rowH = 0, maxX = 0;
+      const gap = zone === "external" ? LIB_GAP : GAP;  // libraries read as a field
+      let x = 0, z = bandZ, rowH = 0;
       for (const s of items) {
-        const fp = compFootprint(s);
-        if (x + fp.w > ROW_W && x > 0) { x = 0; z += rowH + GAP; rowH = 0; }
+        const fp = fps[s.id];
+        if (x + fp.w > rowW && x > 0) { x = 0; z += rowH + gap; rowH = 0; }
         targets[s.id] = { x, z, fp };
-        x += fp.w + GAP; rowH = Math.max(rowH, fp.d);
-        maxX = Math.max(maxX, x);
+        x += fp.w + gap; rowH = Math.max(rowH, fp.d);
       }
-      bandZ = z + rowH + GAP * 2.2;
+      bandZ = z + rowH + GAP * 3;
     }
     // center the whole city on the origin
     let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
@@ -218,12 +234,12 @@
       if (!t) continue;
       const open = expanded.has(s.id) && s.children && s.children.files.length;
       const base = { x: t.x + t.fp.w / 2, z: t.z + t.fp.d / 2 };
-      s._anchor = { x: base.x, y: open ? 0.35 : s.h, z: base.z };
+      s._anchor = { x: base.x, y: open ? 0.35 : s.h * 1.45, z: base.z };
       const key = "c:" + s.id;
       entities.push({
         key, type: "component", comp: s.id,
         tx: base.x, ty: 0, tz: base.z,
-        tw: t.fp.w, th: open ? 0.3 : s.h, td: t.fp.d,
+        tw: t.fp.w, th: open ? 0.3 : s.h * 1.45, td: t.fp.d,
         color: zoneColor(s.zone), label: s.code + " " + s.name.split("/").pop(),
         labelAlways: true, diff: s.diff,
         cur: prev[key]?.cur, born: prev[key] ? prev[key].born : now,
@@ -346,55 +362,114 @@
     }
     return pts;
   }
+  const edgeStats = { compCalls: 0, compUses: 0, fileCalls: 0, fileImports: 0, symbolArcs: 0 };
+  function _lateral(a, b, seedStr) {
+    // deterministic sideways offset so parallel arcs separate instead of stacking
+    let h = 0;
+    for (let i = 0; i < seedStr.length; i++) h = (h * 31 + seedStr.charCodeAt(i)) | 0;
+    const off = ((h % 7) - 3) * 0.22;
+    const dx = b.x - a.x, dz = b.z - a.z, len = Math.hypot(dx, dz) || 1;
+    return { x: (-dz / len) * off, z: (dx / len) * off };
+  }
+  function addArc(a, b, { kind, count, dashed, color, opacity, seed }) {
+    const lat = _lateral(a, b, seed || kind);
+    const dist = Math.hypot(b.x - a.x, b.z - a.z);
+    const lift = 0.9 + dist * 0.07 + Math.log1p(count || 1) * 0.4;
+    const pts = arcPoints(
+      { x: a.x + lat.x, y: a.y, z: a.z + lat.z },
+      { x: b.x + lat.x, y: b.y, z: b.z + lat.z }, lift
+    );
+    const mat = dashed
+      ? new T.LineDashedMaterial({ color, transparent: true, opacity, dashSize: 0.5, gapSize: 0.35 })
+      : new T.LineBasicMaterial({ color, transparent: true, opacity });
+    const line = new T.Line(new T.BufferGeometry().setFromPoints(pts), mat);
+    if (dashed) line.computeLineDistances();
+    edgeGroup.add(line);
+    arcs.push({ pts, kind, count: count || 1, line, srcComp: a.comp, dstComp: b.comp, baseOpacity: opacity });
+  }
+  function _dim() {
+    // focus dimming: with a selection, only incident arcs stay legible
+    const focus = selected?.comp;
+    for (const arc of arcs) {
+      const incident = !focus || arc.srcComp === focus || arc.dstComp === focus;
+      arc.line.material.opacity = incident ? arc.baseOpacity : 0.06;
+    }
+  }
   function rebuildEdges() {
     edgeGroup.clear();
     arcs = [];
-    const symAnchor = {};
-    for (const e of entities) if (e.type === "symbol") symAnchor[e.symIdx] = e;
+    Object.keys(edgeStats).forEach(k => edgeStats[k] = 0);
+    const symAnchor = {}, fileAnchor = {};
+    for (const e of entities) {
+      if (e.type === "symbol") symAnchor[e.symIdx] = e;
+      if (e.type === "file") fileAnchor[e.comp + "::" + e.filePath] = e;
+    }
+    const top = e => ({ x: e.tx, y: e.ty + e.th, z: e.tz, comp: e.comp });
     for (const edge of D.edges) {
+      const sOpen = expanded.has(edge.src), dOpen = expanded.has(edge.dst);
+      if (edge.kind !== "uses" && sOpen && dOpen) continue;  // replaced by symbol/file arcs
+      if (edge.kind === "uses" && sOpen) continue;           // replaced by file-import arcs
+      if (edge.kind === "uses" && !showImports) continue;
+      if (edge.kind !== "uses" && !showCalls) continue;
       const a = byId[edge.src]?._anchor, b = byId[edge.dst]?._anchor;
       if (!a || !b) continue;
-      const bothOpen = expanded.has(edge.src) && expanded.has(edge.dst);
-      if (bothOpen) continue;  // replaced by symbol arcs below
-      const pts = arcPoints(a, b, 1.6 + Math.log1p(edge.count) * 0.6);
-      const geo = new T.BufferGeometry().setFromPoints(pts);
-      const mat = edge.kind === "uses"
-        ? new T.LineDashedMaterial({ color: 0x33321f, transparent: true, opacity: 0.3, dashSize: 0.5, gapSize: 0.35 })
-        : new T.LineBasicMaterial({ color: 0x33321f, transparent: true, opacity: 0.4 });
-      const line = new T.Line(geo, mat);
-      if (edge.kind === "uses") line.computeLineDistances();
-      edgeGroup.add(line);
-      arcs.push({ pts, kind: edge.kind, count: edge.count });
+      addArc({ ...a, comp: edge.src }, { ...b, comp: edge.dst }, {
+        kind: edge.kind, count: edge.count, dashed: edge.kind === "uses",
+        color: edge.kind === "uses" ? 0x8a6a2e : 0x33321f,
+        opacity: edge.kind === "uses" ? 0.18 : 0.3, seed: edge.src + edge.dst,
+      });
+      edge.kind === "uses" ? edgeStats.compUses++ : edgeStats.compCalls++;
     }
-    // symbol-level arcs between two expanded components (8 heaviest per pair)
-    if (SYM.length) {
-      const perPair = {};
+    // file-level wiring for expanded components
+    for (const compId of expanded) {
+      const s = byId[compId];
+      for (const f of s.children?.files || []) {
+        const fe = fileAnchor[compId + "::" + f.path];
+        if (!fe || !showImports) continue;
+        for (const dst of f.imports || []) {
+          if (dst === compId) continue;
+          const target = fileAnchor[dst] ? null : byId[dst]?._anchor;
+          if (!target) continue;
+          addArc(top(fe), { ...target, comp: dst }, {
+            kind: "uses", count: 1, dashed: true, color: 0xb8862e, opacity: 0.55,
+            seed: f.path + dst,
+          });
+          edgeStats.fileImports++;
+        }
+      }
+    }
+    // symbol edges: aggregate to file->file arcs; symbol->symbol when files open
+    if (SYM.length && showCalls) {
+      const filePair = {};
       for (const [si, di, n] of D.symbol_edges || []) {
         const sE = symAnchor[si], dE = symAnchor[di];
-        if (!sE || !dE || sE.comp === dE.comp) {
-          // intra-component: draw when that component's file(s) are open
-          if (sE && dE && sE.comp === dE.comp) {
-            const pts = arcPoints({ x: sE.tx, y: sE.ty + sE.th, z: sE.tz }, { x: dE.tx, y: dE.ty + dE.th, z: dE.tz }, 0.7);
-            const line = new T.Line(new T.BufferGeometry().setFromPoints(pts),
-              new T.LineBasicMaterial({ color: 0x5a7f3c, transparent: true, opacity: 0.55 }));
-            edgeGroup.add(line);
-            arcs.push({ pts, kind: "calls", count: n });
-          }
+        if (sE && dE) {
+          addArc(top(sE), top(dE), {
+            kind: "calls", count: n, color: 0x5a7f3c,
+            opacity: sE.comp === dE.comp ? 0.55 : 0.6, seed: String(si) + ":" + String(di),
+          });
+          edgeStats.symbolArcs++;
           continue;
         }
-        const pk = sE.comp + "|" + dE.comp;
-        (perPair[pk] = perPair[pk] || []).push([sE, dE, n]);
-      }
-      for (const pk in perPair) {
-        for (const [sE, dE, n] of perPair[pk].sort((x, y) => y[2] - x[2]).slice(0, 8)) {
-          const pts = arcPoints({ x: sE.tx, y: sE.ty + sE.th, z: sE.tz }, { x: dE.tx, y: dE.ty + dE.th, z: dE.tz }, 1.4);
-          const line = new T.Line(new T.BufferGeometry().setFromPoints(pts),
-            new T.LineBasicMaterial({ color: 0x5a7f3c, transparent: true, opacity: 0.6 }));
-          edgeGroup.add(line);
-          arcs.push({ pts, kind: "calls", count: n });
+        const sf = symComp[si] != null && expanded.has(symComp[si]) ? symComp[si] + "::" + symFile[si] : null;
+        const df = symComp[di] != null && expanded.has(symComp[di]) ? symComp[di] + "::" + symFile[di] : null;
+        if (sf || df) {
+          const aE = sf ? fileAnchor[sf] : null, bE = df ? fileAnchor[df] : null;
+          const a = aE ? top(aE) : (byId[symComp[si]]?._anchor && { ...byId[symComp[si]]._anchor, comp: symComp[si] });
+          const b = bE ? top(bE) : (byId[symComp[di]]?._anchor && { ...byId[symComp[di]]._anchor, comp: symComp[di] });
+          if (!a || !b || (sf && df && sf === df)) continue;
+          const pk = (sf || symComp[si]) + "|" + (df || symComp[di]);
+          filePair[pk] = filePair[pk] || { a, b, n: 0 };
+          filePair[pk].n += n;
         }
       }
+      for (const pk in filePair) {
+        const { a, b, n } = filePair[pk];
+        addArc(a, b, { kind: "calls", count: n, color: 0x5a7f3c, opacity: 0.6, seed: pk });
+        edgeStats.fileCalls++;
+      }
     }
+    _dim();
     rebuildDots();
   }
   let dots = null, dotState = [];
@@ -440,30 +515,42 @@
   function makeSprite(text, color, scale) {
     const cacheKey = text + "|" + color;
     if (!spriteCache[cacheKey]) {
+      const probe = document.createElement("canvas").getContext("2d");
+      probe.font = "700 28px monospace";
+      const w = Math.max(8, probe.measureText(text).width + 24);
       const cv = document.createElement("canvas");
-      const ctx = cv.getContext("2d");
-      ctx.font = "700 28px monospace";
-      cv.width = Math.max(8, ctx.measureText(text).width + 16); cv.height = 44;
+      cv.width = w; cv.height = 46;
       const c2 = cv.getContext("2d");
+      // paper chip behind the text so labels stay readable over any block
+      c2.fillStyle = "rgba(214,210,184,0.85)";
+      c2.strokeStyle = "rgba(51,50,31,0.5)";
+      c2.beginPath(); c2.roundRect(1, 1, w - 2, 44, 8); c2.fill(); c2.stroke();
       c2.font = "700 28px monospace"; c2.fillStyle = color;
-      c2.fillText(text, 8, 32);
+      c2.fillText(text, 12, 32);
       spriteCache[cacheKey] = { tex: new T.CanvasTexture(cv), aspect: cv.width / cv.height };
     }
     const { tex, aspect } = spriteCache[cacheKey];
-    const sp = new T.Sprite(new T.SpriteMaterial({ map: tex, transparent: true }));
+    const sp = new T.Sprite(new T.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
     sp.scale.set(scale * aspect, scale, 1);
     return sp;
+  }
+  function _labelWanted(e) {
+    if (isSelected(e) || isOnTrace(e) || (hovered && hovered.key === e.key)) return true;
+    if (e.type === "more") return false;
+    if (e.type === "symbol") return camera.zoom >= 7;  // below that: hover reveals
+    if (e.type === "file") return camera.zoom >= 2.2;
+    // declutter: small buildings keep quiet until you zoom in
+    return !(camera.zoom < 1.6 && e.th < 2);
   }
   function refreshLabels() {
     labelGroup.clear();
     for (const e of entities) {
-      if (e.type === "more" || e.type === "symbol" && camera.zoom < 4.5) continue;
-      if (e.type === "file" && camera.zoom < 2.2) continue;
-      const sp = makeSprite(e.label, "#33321f", e.type === "component" ? 1.15 : 0.75);
+      if (!_labelWanted(e)) continue;
+      const sp = makeSprite(e.label, "#33321f", e.type === "component" ? 1.05 : e.type === "file" ? 0.7 : 0.52);
       sp.position.set(e.tx, e.ty + e.th + (e.type === "component" ? 0.9 : 0.5), e.tz);
       labelGroup.add(sp);
       if (e.type === "component" && e.diff && (e.diff.added || e.diff.removed)) {
-        const badge = makeSprite(`+${e.diff.added} -${e.diff.removed}`, "#8b2e2e", 0.95);
+        const badge = makeSprite(`+${e.diff.added} -${e.diff.removed}`, "#8b2e2e", 0.9);
         badge.position.set(e.tx, e.ty + e.th + 1.9, e.tz);
         badge.userData.bob = true;
         labelGroup.add(badge);
@@ -479,6 +566,21 @@
   // ---------- picking ----------
   const ray = new T.Raycaster();
   let down = null;
+  let hoverThrottle = 0;
+  renderer.domElement.addEventListener("pointermove", e => {
+    const now = performance.now();
+    if (now - hoverThrottle < 80) return;  // raycast at ~12Hz, not per-move
+    hoverThrottle = now;
+    const r = renderer.domElement.getBoundingClientRect();
+    ray.setFromCamera(new T.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+    const hit = ray.intersectObject(mesh)[0];
+    const ent = hit ? entities[hit.instanceId] : null;
+    if ((ent?.key || null) !== (hovered?.key || null)) {
+      hovered = ent || null;
+      renderer.domElement.style.cursor = hovered ? "pointer" : "grab";
+      refreshLabels();
+    }
+  });
   renderer.domElement.addEventListener("pointerdown", e => { down = { x: e.clientX, y: e.clientY }; });
   renderer.domElement.addEventListener("pointerup", e => {
     if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) { down = null; return; }
@@ -524,11 +626,19 @@
     const s = byId[sel.comp];
     let title = s.name, zoneLabel = D.zones[s.zone].label + " · " + s.code, what = "", how = "";
     let symIds = s.symbols || [];
+    let fileImportsHtml = "";
     if (sel.type === "file") {
       title = sel.filePath;
       const f = s.children.files.find(f => f.path === sel.filePath);
       symIds = (f?.symbols || []).map(x => SYM[x.i]);
       how = `${f?.loc ?? "?"} LOC · ${f?.symbols_total ?? "?"} symbols`;
+      if (f?.imports?.length) {
+        const rows = f.imports.map(imp =>
+          `<div class="railitem" data-imp="${imp}"><span class="code">→</span><span>${imp}</span></div>`
+        ).join("");
+        const more = f.imports_total > f.imports.length ? `<div style="opacity:.5">… +${f.imports_total - f.imports.length} more</div>` : "";
+        fileImportsHtml = `<div class="railhead">IMPORTS</div>${rows}${more}`;
+      }
     } else if (sel.type === "symbol") {
       const sid = SYM[sel.symIdx];
       title = sid.split("::").pop();
@@ -552,9 +662,14 @@
       ${diffHtml}
       <div class="tabs"><button id="tb-what" class="on">what it does</button><button id="tb-how">how it's built</button></div>
       <div class="body" id="tab-body"></div>
+      ${fileImportsHtml}
       ${reasonsHtml}
       <div class="railhead">TRACE</div>
       <div id="tracelist"></div>`;
+    panel.querySelectorAll("[data-imp]").forEach(el => el.onclick = () => {
+      const target = el.dataset.imp;
+      if (byId[target]) { select({ type: "component", comp: target }); flyTo(target); }
+    });
     const body = panel.querySelector("#tab-body");
     body.textContent = what;
     panel.querySelector("#tb-what").onclick = () => { body.textContent = what; tab("what"); };
@@ -564,6 +679,8 @@
       panel.querySelector("#tb-how").classList.toggle("on", which === "how");
     }
     renderTrace();
+    _dim();
+    refreshLabels();
   }
   function renderTrace() {
     const list = panel.querySelector("#tracelist");
@@ -656,6 +773,16 @@
     flowing = !flowing;
     e.target.textContent = flowing ? "pause flow" : "resume flow";
   };
+  document.getElementById("btn-calls").onclick = e => {
+    showCalls = !showCalls;
+    e.target.style.opacity = showCalls ? 1 : 0.4;
+    rebuildEdges();
+  };
+  document.getElementById("btn-imports").onclick = e => {
+    showImports = !showImports;
+    e.target.style.opacity = showImports ? 1 : 0.4;
+    rebuildEdges();
+  };
   document.getElementById("btn-trace").onclick = () => setTrace((traceStep + 1) % D.trace.length);
   document.getElementById("btn-collapse").onclick = () => {
     expanded.clear(); expandedFiles.clear(); rebuildEntities(); writeHash();
@@ -700,6 +827,9 @@
     setTrace,
     select: id => select({ type: "component", comp: id }),
     state: () => ({ expanded: [...expanded], files: [...expandedFiles], entities: entities.length }),
+    edgeStats: () => ({ ...edgeStats }),
+    toggleCalls: () => document.getElementById("btn-calls").click(),
+    toggleImports: () => document.getElementById("btn-imports").click(),
   };
 })();
 </script>

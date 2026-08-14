@@ -22,9 +22,14 @@ def _fixture_graph():
         Node(id="cli/main.py::main", kind="function", name="main",
              path="/repo/cli/main.py", line_start=1, line_end=40),
     ]
+    nodes.append(
+        Node(id="core/logic.py::<file>", kind="file", name="logic.py", path="/repo/core/logic.py")
+    )
+    nodes.append(Node(id="lib::sample_pkg", kind="library", name="sample_pkg", is_external=True))
     edges = [
         Edge(src="cli/main.py::main", dst="core/logic.py::apply", kind="calls"),
         Edge(src="core/logic.py::apply", dst="core/logic.py::helper", kind="calls"),
+        Edge(src="core/logic.py::<file>", dst="lib::sample_pkg", kind="uses_library"),
     ]
     return Graph(nodes=nodes, edges=edges)
 
@@ -121,6 +126,23 @@ class TestCity3d:
         page = page_factory("#inside=core")
         page.wait_for_timeout(400)
         assert "core" in page.evaluate("window.__city.state().expanded")
+
+    def test_expanded_component_shows_file_wiring_and_import_arcs(self, page_factory):
+        page = page_factory()
+        page.evaluate("window.__city.expand('core')")
+        page.wait_for_timeout(400)
+        stats = page.evaluate("window.__city.edgeStats()")
+        assert stats["fileImports"] > 0, "expanded files should draw import arcs"
+
+    def test_toggles_zero_out_their_edge_class(self, page_factory):
+        page = page_factory()
+        page.evaluate("window.__city.expand('core')")
+        page.wait_for_timeout(300)
+        page.evaluate("window.__city.toggleImports(); window.__city.toggleCalls()")
+        page.wait_for_timeout(300)
+        stats = page.evaluate("window.__city.edgeStats()")
+        assert stats["fileImports"] == 0
+        assert stats["compCalls"] == 0 and stats["symbolArcs"] == 0 and stats["fileCalls"] == 0
 
     def test_trace_step_selects_component(self, page_factory):
         page = page_factory()

@@ -98,8 +98,19 @@ def build_city_data(
 
     comp_edges: dict[tuple[str, str, str], int] = defaultdict(int)
     sym_edges: dict[tuple[str, str], int] = defaultdict(int)
+    # file node id -> repo-relative path, so import edges attribute to files
+    file_rel: dict[str, str] = {}
+    for node in graph.nodes:
+        if node.kind == "file" and node.path:
+            try:
+                file_rel[node.id] = Path(node.path).relative_to(project_root).as_posix()
+            except ValueError:
+                file_rel[node.id] = node.path
+    file_imports: dict[str, set[str]] = defaultdict(set)
     for edge in graph.edges:
         src, dst = node_comp.get(edge.src), node_comp.get(edge.dst)
+        if detail and edge.kind in ("imports", "uses_library") and edge.src in file_rel and dst:
+            file_imports[file_rel[edge.src]].add(dst)
         if not src or not dst:
             continue
         if src != dst:
@@ -155,7 +166,7 @@ def build_city_data(
         }
         if detail:
             structure["children"] = _children(
-                comp_symbols[comp], nodes_by_id, sym_i, project_root
+                comp_symbols[comp], nodes_by_id, sym_i, project_root, file_imports
             )
         structures.append(structure)
 
@@ -200,6 +211,7 @@ def _children(
     nodes_by_id: dict[str, Any],
     sym_i: dict[str, int],
     project_root: str,
+    file_imports: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     by_file: dict[str, list[Any]] = defaultdict(list)
     for sid in symbol_ids:
@@ -231,6 +243,8 @@ def _children(
                     for n in sorted(nodes, key=lambda n: -_node_loc(n))[:MAX_SYMBOLS_PER_FILE]
                 ],
                 "symbols_total": len(nodes),
+                "imports": sorted((file_imports or {}).get(rel, set()))[:30],
+                "imports_total": len((file_imports or {}).get(rel, set())),
             }
         )
     files.sort(key=lambda f: -f["loc"])
