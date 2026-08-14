@@ -17,7 +17,7 @@ Use the `code-graph` MCP tools (or the `codegraph` CLI) instead of grepping when
 
 1. Not indexed yet? Run `index_repo` (CLI: `codegraph index`) once; re-run with `incremental=true` after changes.
 2. "Who calls X / what does X call" → `trace_path(function_name, direction=in|out|both)`.
-3. "Show the architecture / visualize the codebase" → `get_architecture`, or `codegraph ui` for the interactive isometric map (`--base main` adds PR diff badges).
+3. "Show the architecture / visualize the codebase" → `get_architecture`, or `codegraph ui` for the interactive 3D code city — click a component to expand its files in place, click a file for its functions; `--base main` adds PR diff badges; `--flat` gives the 2D no-WebGL map. Share exact views via the hash: `#inside=a,b&file=comp:path&trace=N&focus=symbolId`.
 4. "What changed in this PR and what does it touch" → `diff_overlay(base)`: per-symbol added/removed line numbers plus hunks; combine with inbound `trace_path` on changed symbols for blast radius.
 5. Arbitrary structure questions → `query_graph` with Cypher (nodes: Function, Class, File, Module; edges: CALLS, IMPORTS, CONTAINS).
 

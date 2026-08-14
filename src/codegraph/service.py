@@ -10,7 +10,6 @@ from codegraph.diff.pr_overlay import DiffOverlay, build_overlay, git_diff
 from codegraph.engine.cgc_adapter import CgcAdapter
 from codegraph.engine.protocol import EngineAdapter
 from codegraph.export.graphjson import export_graph
-from codegraph.export.isometric import build_isometric_data
 from codegraph.model.graph import Graph, synthesize_library_nodes
 from codegraph.overlay.descriptions import Description, DescriptionStore, content_hash
 from codegraph.overlay.reasons import Reason, ReasonLog
@@ -83,30 +82,66 @@ class CodeGraphService:
     def export_graphjson(self, out_path: str) -> str:
         return str(export_graph(self.graph(), self.project_root, out_path))
 
-    def export_isometric(
-        self, out_path: str, title: str | None = None, base: str | None = None, scrub: bool = False
-    ) -> str:
-        diff = self.diff(base) if base else None
-        data = build_isometric_data(
-            self.graph(),
-            self.project_root,
-            title or Path(self.project_root).name,
-            diff=diff,
-            scrub=scrub,
-        )
-        template = Path(__file__).parent.parent.parent / "viz" / "isometric-template.html"
-        if not template.exists():
-            # installed-package fallback: template ships inside the package
-            template = Path(__file__).parent / "viz" / "isometric-template.html"
-        if not template.exists():
-            raise FileNotFoundError(f"isometric template not found at {template}")
-        html = template.read_text().replace(
-            "/*__CODEGRAPH_DATA__*/", "window.CODEGRAPH_DATA = " + json.dumps(data) + ";"
-        )
+    def _viz_path(self, name: str) -> Path:
+        candidate = Path(__file__).parent.parent.parent / "viz" / name
+        if not candidate.exists():
+            # installed-package fallback: viz/ ships inside the wheel
+            candidate = Path(__file__).parent / "viz" / name
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"viz asset {name!r} not found at {candidate}"
+                + (" — run `node scripts/build-vendor.mjs`" if name.endswith(".js") else "")
+            )
+        return candidate
+
+    def _render_template(self, template_name: str, replacements: dict[str, str], out_path: str) -> str:
+        html = self._viz_path(template_name).read_text()
+        for placeholder, value in replacements.items():
+            marker = f"/*__{placeholder}__*/"
+            if marker not in html:
+                raise ValueError(f"template {template_name} is missing {marker}")
+            html = html.replace(marker, value)
         out = Path(out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(html)
         return str(out)
+
+    def _city_data(self, title: str | None, base: str | None, scrub: bool, detail: bool) -> str:
+        from codegraph.export.city import build_city_data
+
+        data = build_city_data(
+            self.graph(),
+            self.project_root,
+            title or Path(self.project_root).name,
+            diff=self.diff(base) if base else None,
+            scrub=scrub,
+            detail=detail,
+        )
+        # escape "</" so no description/source string can terminate the script tag
+        payload = json.dumps(data).replace("</", "<\\/")
+        return f"window.CODEGRAPH_DATA = {payload};"
+
+    def export_isometric(
+        self, out_path: str, title: str | None = None, base: str | None = None, scrub: bool = False
+    ) -> str:
+        return self._render_template(
+            "isometric-template.html",
+            {"CODEGRAPH_DATA": self._city_data(title, base, scrub, detail=False)},
+            out_path,
+        )
+
+    def export_city3d(
+        self, out_path: str, title: str | None = None, base: str | None = None, scrub: bool = False
+    ) -> str:
+        bundle = self._viz_path("vendor/three-bundle.min.js").read_text()
+        return self._render_template(
+            "city3d-template.html",
+            {
+                "THREE_BUNDLE": bundle,
+                "CODEGRAPH_DATA": self._city_data(title, base, scrub, detail=True),
+            },
+            out_path,
+        )
 
     def doctor(self) -> list[str]:
         lines = self.engine.doctor()

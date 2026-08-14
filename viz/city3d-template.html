@@ -1,0 +1,707 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>codegraph — 3d city</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='2' y='6' width='8' height='8' fill='%238fa3d9'/><rect x='6' y='2' width='8' height='8' fill='%23c9d96e'/></svg>">
+<style>
+  :root {
+    --paper: #d6d2b8; --ink: #33321f; --panel: #ccc8ae; --line: #8a8768;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: var(--mono); background: var(--paper); color: var(--ink);
+    display: grid; grid-template-rows: auto 1fr; height: 100vh; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 1.5rem; padding: .5rem 1rem;
+    border-bottom: 1.5px solid var(--ink); font-size: 11px;
+  }
+  header .stat b { display: block; font-size: 13px; }
+  header .title { font-size: 14px; font-weight: 700; letter-spacing: .05em; }
+  header .spacer { flex: 1; }
+  button {
+    font: inherit; font-size: 10px; background: var(--panel); color: var(--ink);
+    border: 1.5px solid var(--ink); padding: .35rem .6rem; cursor: pointer;
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  button:hover { background: var(--ink); color: var(--paper); }
+  main { display: grid; grid-template-columns: 220px 1fr 300px; min-height: 0; }
+  #rail, #panel {
+    overflow-y: auto; padding: .8rem; font-size: 11px;
+    border-right: 1.5px solid var(--ink); background: var(--paper);
+  }
+  #panel { border-right: 0; border-left: 1.5px solid var(--ink); }
+  .railhead { font-size: 9px; letter-spacing: .15em; opacity: .65; margin: 1rem 0 .4rem; }
+  .railitem {
+    display: flex; gap: .5rem; padding: .3rem .4rem; cursor: pointer;
+    border: 1px solid transparent; align-items: baseline;
+  }
+  .railitem:hover, .railitem.sel { border-color: var(--ink); background: var(--panel); }
+  .railitem .code { font-weight: 700; font-size: 9px; opacity: .6; }
+  .railitem .loc { margin-left: auto; font-size: 9px; opacity: .5; }
+  #stage { position: relative; min-width: 0; }
+  #stage canvas { display: block; cursor: grab; }
+  #panel h2 { font-size: 15px; margin: .2rem 0 .1rem; overflow-wrap: anywhere; }
+  #panel .zone { font-size: 9px; letter-spacing: .12em; opacity: .65; }
+  #panel .tabs { display: flex; gap: .3rem; margin: .7rem 0; }
+  #panel .tabs button.on { background: var(--ink); color: var(--paper); }
+  #panel .body { line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #panel .diffbadge { font-weight: 700; margin: .5rem 0; }
+  #panel .add { color: #2c5f2d; } #panel .del { color: #8b2e2e; }
+  .tracestep { padding: .25rem .4rem; opacity: .55; cursor: pointer; }
+  .tracestep.on { opacity: 1; font-weight: 700; background: var(--panel); border-left: 3px solid var(--ink); }
+  .hint { font-size: 9px; opacity: .55; margin-top: .6rem; line-height: 1.6; }
+</style>
+</head>
+<body>
+<header>
+  <div class="title" id="title">codegraph</div>
+  <div class="stat"><b id="st-comp">0</b>components</div>
+  <div class="stat"><b id="st-sym">0</b>symbols</div>
+  <div class="stat"><b id="st-loc">0</b>LOC indexed</div>
+  <div class="stat" id="st-diff" style="display:none"><b id="st-diff-v"></b>diff</div>
+  <div class="spacer"></div>
+  <button id="btn-flow">pause flow</button>
+  <button id="btn-trace">trace one step</button>
+  <button id="btn-collapse">collapse all</button>
+  <button id="btn-reset">reset view</button>
+</header>
+<main>
+  <nav id="rail"></nav>
+  <section id="stage"></section>
+  <aside id="panel"><div style="opacity:.6">Select a component…<div class="hint">drag = orbit · right-drag = pan · wheel = zoom<br>click a building = expand its files<br>click a file = expand its functions</div></div></aside>
+</main>
+<script>/*__THREE_BUNDLE__*/</script>
+<script>
+/*__CODEGRAPH_DATA__*/
+(() => {
+  const D = window.CODEGRAPH_DATA;
+  if (!D || !window.THREE) { document.body.innerHTML = "<p style='padding:2rem'>Missing data or renderer bundle — generate with `codegraph export --format 3d`.</p>"; return; }
+  const T = window.THREE;
+  const SYM = D.symbol_index || [];
+
+  // ---------- header + rail ----------
+  document.getElementById("title").textContent = D.title;
+  document.getElementById("st-comp").textContent = D.stats.components;
+  document.getElementById("st-sym").textContent = D.stats.symbols;
+  document.getElementById("st-loc").textContent = D.stats.loc_indexed.toLocaleString();
+  if (D.stats.diff) {
+    document.getElementById("st-diff").style.display = "";
+    document.getElementById("st-diff-v").textContent = D.stats.diff.base + "…" + (D.stats.diff.head || "HEAD");
+  }
+  const byId = Object.fromEntries(D.structures.map(s => [s.id, s]));
+  const zoneOrder = ["entry", "interface", "core", "storage", "quality", "external"];
+  const rail = document.getElementById("rail");
+  for (const z of zoneOrder) {
+    const items = D.structures.filter(s => s.zone === z);
+    if (!items.length) continue;
+    const head = document.createElement("div");
+    head.className = "railhead"; head.textContent = D.zones[z].label;
+    rail.appendChild(head);
+    for (const s of items) {
+      const el = document.createElement("div");
+      el.className = "railitem"; el.dataset.id = s.id;
+      el.innerHTML = `<span class="code">${s.code}</span><span>${s.name}</span><span class="loc">${s.loc}</span>`;
+      el.onclick = () => { select({ type: "component", comp: s.id }); flyTo(s.id); };
+      rail.appendChild(el);
+    }
+  }
+
+  // ---------- three setup ----------
+  const stage = document.getElementById("stage");
+  const renderer = new T.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  stage.appendChild(renderer.domElement);
+  const scene = new T.Scene();
+  const PAPER = new T.Color("#d6d2b8");
+  scene.background = PAPER;
+  scene.fog = new T.Fog(PAPER, 120, 320);
+  const camera = new T.OrthographicCamera(-1, 1, 1, -1, -500, 1000);
+  camera.zoom = 1.15;
+  const controls = new T.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  scene.add(new T.AmbientLight(0xffffff, 0.75));
+  const sun = new T.DirectionalLight(0xffffff, 1.1);
+  sun.position.set(-40, 80, 30);
+  scene.add(sun);
+  const grid = new T.GridHelper(400, 100, 0x8a8768, 0xbdb99f);
+  grid.material.transparent = true; grid.material.opacity = 0.35;
+  grid.position.y = -0.02;
+  scene.add(grid);
+
+  function resize() {
+    const w = stage.clientWidth, h = stage.clientHeight;
+    renderer.setSize(w, h);
+    const aspect = w / h;
+    camera.left = -aspect * 30; camera.right = aspect * 30;
+    camera.top = 30; camera.bottom = -30;
+    camera.updateProjectionMatrix();
+  }
+  new ResizeObserver(resize).observe(stage);
+  resize();
+
+  // ---------- expansion state ----------
+  const expanded = new Set();          // component ids
+  const expandedFiles = new Set();     // `${comp}::${path}`
+  let selected = null;                 // {type, comp, filePath?, symIdx?}
+  let traceStep = -1;
+  let flowing = true;
+
+  // ---------- layout: shelf-packed zone bands in world units ----------
+  const COMP_W = 2.4, GAP = 1.1, ROW_W = 34;
+  function fileCellSide(comp, file) {
+    const key = comp.id + "::" + file.path;
+    if (!expandedFiles.has(key)) return 1.7;
+    return Math.ceil(Math.sqrt(file.symbols.length)) * 1.05 + 0.7;
+  }
+  function compFootprint(s) {
+    if (!expanded.has(s.id) || !s.children || !s.children.files.length) return { w: COMP_W, d: COMP_W };
+    const cells = s.children.files.map(f => fileCellSide(s, f));
+    const area = cells.reduce((a, c) => a + c * c, 0);
+    const w = Math.max(COMP_W + 1, Math.ceil(Math.sqrt(area * 1.5)));
+    // shelf-pack file cells into rows of width w
+    let x = 0, z = 0, rowH = 0;
+    const filePos = {};
+    for (let i = 0; i < s.children.files.length; i++) {
+      const side = cells[i];
+      if (x + side > w && x > 0) { x = 0; z += rowH + 0.35; rowH = 0; }
+      filePos[s.children.files[i].path] = { x: x + side / 2, z: z + side / 2, side };
+      x += side + 0.35; rowH = Math.max(rowH, side);
+    }
+    return { w: Math.max(w, 2.5), d: z + rowH + 0.6, filePos };
+  }
+  function layout() {
+    const counts = {};
+    const targets = {};
+    let bandZ = 0;
+    for (const zone of zoneOrder) {
+      const items = D.structures.filter(s => s.zone === zone);
+      if (!items.length) continue;
+      let x = 0, z = bandZ, rowH = 0, maxX = 0;
+      for (const s of items) {
+        const fp = compFootprint(s);
+        if (x + fp.w > ROW_W && x > 0) { x = 0; z += rowH + GAP; rowH = 0; }
+        targets[s.id] = { x, z, fp };
+        x += fp.w + GAP; rowH = Math.max(rowH, fp.d);
+        maxX = Math.max(maxX, x);
+      }
+      bandZ = z + rowH + GAP * 2.2;
+    }
+    // center the whole city on the origin
+    let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
+    for (const id in targets) {
+      const t = targets[id];
+      minX = Math.min(minX, t.x); maxX = Math.max(maxX, t.x + t.fp.w);
+      minZ = Math.min(minZ, t.z); maxZ = Math.max(maxZ, t.z + t.fp.d);
+    }
+    const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+    for (const id in targets) { targets[id].x -= cx; targets[id].z -= cz; }
+    return targets;
+  }
+
+  // ---------- entities ----------
+  const zoneColor = z => new T.Color(D.zones[z].color);
+  const INK = new T.Color("#33321f");
+  const WARM = new T.Color("#c46a4a");
+  let entities = [];
+  function rebuildEntities() {
+    const targets = layout();
+    const prev = Object.fromEntries(entities.map(e => [e.key, e]));
+    entities = [];
+    const now = performance.now();
+    for (const s of D.structures) {
+      const t = targets[s.id];
+      if (!t) continue;
+      const open = expanded.has(s.id) && s.children && s.children.files.length;
+      const base = { x: t.x + t.fp.w / 2, z: t.z + t.fp.d / 2 };
+      s._anchor = { x: base.x, y: open ? 0.35 : s.h, z: base.z };
+      const key = "c:" + s.id;
+      entities.push({
+        key, type: "component", comp: s.id,
+        tx: base.x, ty: 0, tz: base.z,
+        tw: t.fp.w, th: open ? 0.3 : s.h, td: t.fp.d,
+        color: zoneColor(s.zone), label: s.code + " " + s.name.split("/").pop(),
+        labelAlways: true, diff: s.diff,
+        cur: prev[key]?.cur, born: prev[key] ? prev[key].born : now,
+      });
+      if (!open) continue;
+      let fi = 0;
+      for (const f of s.children.files) {
+        const fp = t.fp.filePos[f.path];
+        if (!fp) continue;
+        const fx = t.x + fp.x, fz = t.z + fp.z;
+        const fkey = "f:" + s.id + "::" + f.path;
+        const fOpen = expandedFiles.has(s.id + "::" + f.path);
+        entities.push({
+          key: fkey, type: "file", comp: s.id, filePath: f.path,
+          tx: fx, ty: 0.3, tz: fz,
+          tw: fp.side - 0.25, th: fOpen ? 0.14 : 0.55 + Math.min(1.1, Math.log1p(f.loc) / 5),
+          td: fp.side - 0.25,
+          color: zoneColor(s.zone).clone().lerp(new T.Color("#ffffff"), 0.25),
+          label: f.path.split("/").pop(), born: prev[fkey] ? prev[fkey].born : now + fi * 40,
+          cur: prev[fkey]?.cur,
+        });
+        if (fOpen) {
+          const n = f.symbols.length;
+          const cols = Math.ceil(Math.sqrt(n));
+          const cell = 0.95;
+          let si = 0;
+          for (const sym of f.symbols) {
+            const sx = fx - fp.side / 2 + 0.65 + (si % cols) * cell;
+            const sz = fz - fp.side / 2 + 0.65 + Math.floor(si / cols) * cell;
+            const skey = "s:" + sym.i;
+            const cx = Math.min(1, (sym.complexity || 0) / 12);
+            entities.push({
+              key: skey, type: "symbol", comp: s.id, filePath: f.path, symIdx: sym.i,
+              tx: sx, ty: 0.44, tz: sz,
+              tw: 0.7, th: 0.3 + Math.min(1.3, Math.log1p(sym.loc) / 3.2), td: 0.7,
+              color: zoneColor(s.zone).clone().lerp(WARM, cx),
+              label: sym.name, born: prev[skey] ? prev[skey].born : now + 80 + si * 25,
+              cur: prev[skey]?.cur,
+            });
+            si++;
+          }
+          if (f.symbols_total > f.symbols.length) {
+            entities.push({
+              key: "m:" + fkey, type: "more", comp: s.id, filePath: f.path,
+              tx: fx, ty: 0.44, tz: fz + fp.side / 2 - 0.4,
+              tw: 0.6, th: 0.25, td: 0.6, color: new T.Color("#8a8768"),
+              label: "+" + (f.symbols_total - f.symbols.length) + " more", born: now,
+            });
+          }
+        }
+        fi++;
+      }
+    }
+    for (const e of entities) if (!e.cur) e.cur = { x: e.tx, y: -0.4, z: e.tz, w: e.tw, h: 0.01, d: e.td };
+    rebuildEdges();
+    refreshLabels();
+    syncInstanceCount();
+  }
+
+  // ---------- instanced rendering (boxes + silhouette outlines) ----------
+  const MAXN = 4096;
+  const boxGeo = new T.BoxGeometry(1, 1, 1); boxGeo.translate(0, 0.5, 0);
+  const boxMat = new T.MeshLambertMaterial();
+  const mesh = new T.InstancedMesh(boxGeo, boxMat, MAXN);
+  mesh.instanceMatrix.setUsage(T.DynamicDrawUsage);
+  scene.add(mesh);
+  const outlineMat = new T.MeshBasicMaterial({ color: INK, side: T.BackSide });
+  const outline = new T.InstancedMesh(boxGeo, outlineMat, MAXN);
+  outline.instanceMatrix.setUsage(T.DynamicDrawUsage);
+  outline.raycast = () => {};   // outlines must not swallow picks
+  scene.add(outline);
+  const m4 = new T.Matrix4();
+  function syncInstanceCount() { mesh.count = entities.length; outline.count = entities.length; }
+  function updateInstances(now) {
+    const k = 1 - Math.pow(0.0005, 1 / 60);  // spring toward targets
+    for (let i = 0; i < entities.length; i++) {
+      const e = entities[i];
+      const active = now >= e.born;
+      const c = e.cur;
+      if (active) {
+        c.x += (e.tx - c.x) * k * 1.6; c.y += (e.ty - c.y) * k * 1.6; c.z += (e.tz - c.z) * k * 1.6;
+        c.w += (e.tw - c.w) * k * 1.6; c.h += (e.th - c.h) * k * 1.6; c.d += (e.td - c.d) * k * 1.6;
+      }
+      m4.makeScale(Math.max(c.w, 0.01), Math.max(c.h, 0.01), Math.max(c.d, 0.01));
+      m4.setPosition(c.x, c.y, c.z);
+      mesh.setMatrixAt(i, m4);
+      const hl = isSelected(e) || isOnTrace(e);
+      m4.makeScale(Math.max(c.w, 0.01) * 1.06 + 0.05, Math.max(c.h, 0.01) * 1.03 + 0.03, Math.max(c.d, 0.01) * 1.06 + 0.05);
+      m4.setPosition(c.x, c.y - 0.012, c.z);
+      outline.setMatrixAt(i, m4);
+      const col = hl ? e.color.clone().lerp(new T.Color("#ffffff"), 0.35) : e.color;
+      mesh.setColorAt(i, col);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    outline.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }
+  function isSelected(e) {
+    if (!selected) return false;
+    if (selected.type === "component") return e.type === "component" && e.comp === selected.comp;
+    if (selected.type === "file") return e.type === "file" && e.comp === selected.comp && e.filePath === selected.filePath;
+    if (selected.type === "symbol") return e.type === "symbol" && e.symIdx === selected.symIdx;
+    return false;
+  }
+  function isOnTrace(e) {
+    return traceStep >= 0 && e.type === "component" && D.trace[traceStep]?.structure === e.comp;
+  }
+
+  // ---------- edges + flow dots ----------
+  const edgeGroup = new T.Group();
+  scene.add(edgeGroup);
+  let arcs = [];
+  function arcPoints(a, b, lift) {
+    const pts = [];
+    for (let i = 0; i <= 24; i++) {
+      const t = i / 24;
+      const x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
+      const y = a.y + (b.y - a.y) * t + Math.sin(Math.PI * t) * lift;
+      pts.push(new T.Vector3(x, y, z));
+    }
+    return pts;
+  }
+  function rebuildEdges() {
+    edgeGroup.clear();
+    arcs = [];
+    const symAnchor = {};
+    for (const e of entities) if (e.type === "symbol") symAnchor[e.symIdx] = e;
+    for (const edge of D.edges) {
+      const a = byId[edge.src]?._anchor, b = byId[edge.dst]?._anchor;
+      if (!a || !b) continue;
+      const bothOpen = expanded.has(edge.src) && expanded.has(edge.dst);
+      if (bothOpen) continue;  // replaced by symbol arcs below
+      const pts = arcPoints(a, b, 1.6 + Math.log1p(edge.count) * 0.6);
+      const geo = new T.BufferGeometry().setFromPoints(pts);
+      const mat = edge.kind === "uses"
+        ? new T.LineDashedMaterial({ color: 0x33321f, transparent: true, opacity: 0.3, dashSize: 0.5, gapSize: 0.35 })
+        : new T.LineBasicMaterial({ color: 0x33321f, transparent: true, opacity: 0.4 });
+      const line = new T.Line(geo, mat);
+      if (edge.kind === "uses") line.computeLineDistances();
+      edgeGroup.add(line);
+      arcs.push({ pts, kind: edge.kind, count: edge.count });
+    }
+    // symbol-level arcs between two expanded components (8 heaviest per pair)
+    if (SYM.length) {
+      const perPair = {};
+      for (const [si, di, n] of D.symbol_edges || []) {
+        const sE = symAnchor[si], dE = symAnchor[di];
+        if (!sE || !dE || sE.comp === dE.comp) {
+          // intra-component: draw when that component's file(s) are open
+          if (sE && dE && sE.comp === dE.comp) {
+            const pts = arcPoints({ x: sE.tx, y: sE.ty + sE.th, z: sE.tz }, { x: dE.tx, y: dE.ty + dE.th, z: dE.tz }, 0.7);
+            const line = new T.Line(new T.BufferGeometry().setFromPoints(pts),
+              new T.LineBasicMaterial({ color: 0x5a7f3c, transparent: true, opacity: 0.55 }));
+            edgeGroup.add(line);
+            arcs.push({ pts, kind: "calls", count: n });
+          }
+          continue;
+        }
+        const pk = sE.comp + "|" + dE.comp;
+        (perPair[pk] = perPair[pk] || []).push([sE, dE, n]);
+      }
+      for (const pk in perPair) {
+        for (const [sE, dE, n] of perPair[pk].sort((x, y) => y[2] - x[2]).slice(0, 8)) {
+          const pts = arcPoints({ x: sE.tx, y: sE.ty + sE.th, z: sE.tz }, { x: dE.tx, y: dE.ty + dE.th, z: dE.tz }, 1.4);
+          const line = new T.Line(new T.BufferGeometry().setFromPoints(pts),
+            new T.LineBasicMaterial({ color: 0x5a7f3c, transparent: true, opacity: 0.6 }));
+          edgeGroup.add(line);
+          arcs.push({ pts, kind: "calls", count: n });
+        }
+      }
+    }
+    rebuildDots();
+  }
+  let dots = null, dotState = [];
+  function rebuildDots() {
+    if (dots) { scene.remove(dots); dots.geometry.dispose(); }
+    dotState = [];
+    for (let a = 0; a < arcs.length; a++) {
+      const n = Math.min(3, 1 + Math.floor(Math.log1p(arcs[a].count)));
+      for (let j = 0; j < n; j++) dotState.push({ arc: a, t: (j / n + a * 0.13) % 1 });
+    }
+    const geo = new T.BufferGeometry();
+    geo.setAttribute("position", new T.BufferAttribute(new Float32Array(dotState.length * 3), 3));
+    geo.setAttribute("color", new T.BufferAttribute(new Float32Array(dotState.length * 3), 3));
+    const green = new T.Color("#5a7f3c"), amber = new T.Color("#b8862e");
+    dotState.forEach((d, i) => {
+      const c = arcs[d.arc].kind === "uses" ? amber : green;
+      geo.attributes.color.setXYZ(i, c.r, c.g, c.b);
+    });
+    dots = new T.Points(geo, new T.PointsMaterial({ size: 0.45, vertexColors: true }));
+    scene.add(dots);
+  }
+  function updateDots(dt) {
+    if (!dots || !flowing) return;
+    const pos = dots.geometry.attributes.position;
+    for (let i = 0; i < dotState.length; i++) {
+      const d = dotState[i];
+      d.t = (d.t + dt * 0.00012 * (1 + (i % 3))) % 1;
+      const pts = arcs[d.arc]?.pts;
+      if (!pts || !pts.length) continue;
+      const f = Math.max(0, Math.min(d.t, 0.999)) * (pts.length - 1);
+      const i0 = Math.floor(f), frac = f - i0;
+      const p0 = pts[i0], p1 = pts[Math.min(i0 + 1, pts.length - 1)];
+      if (!p0 || !p1) continue;
+      pos.setXYZ(i, p0.x + (p1.x - p0.x) * frac, p0.y + (p1.y - p0.y) * frac, p0.z + (p1.z - p0.z) * frac);
+    }
+    pos.needsUpdate = true;
+  }
+
+  // ---------- labels + diff badges (canvas sprites) ----------
+  const labelGroup = new T.Group();
+  scene.add(labelGroup);
+  const spriteCache = {};
+  function makeSprite(text, color, scale) {
+    const cacheKey = text + "|" + color;
+    if (!spriteCache[cacheKey]) {
+      const cv = document.createElement("canvas");
+      const ctx = cv.getContext("2d");
+      ctx.font = "700 28px monospace";
+      cv.width = Math.max(8, ctx.measureText(text).width + 16); cv.height = 44;
+      const c2 = cv.getContext("2d");
+      c2.font = "700 28px monospace"; c2.fillStyle = color;
+      c2.fillText(text, 8, 32);
+      spriteCache[cacheKey] = { tex: new T.CanvasTexture(cv), aspect: cv.width / cv.height };
+    }
+    const { tex, aspect } = spriteCache[cacheKey];
+    const sp = new T.Sprite(new T.SpriteMaterial({ map: tex, transparent: true }));
+    sp.scale.set(scale * aspect, scale, 1);
+    return sp;
+  }
+  function refreshLabels() {
+    labelGroup.clear();
+    for (const e of entities) {
+      if (e.type === "more" || e.type === "symbol" && camera.zoom < 4.5) continue;
+      if (e.type === "file" && camera.zoom < 2.2) continue;
+      const sp = makeSprite(e.label, "#33321f", e.type === "component" ? 1.15 : 0.75);
+      sp.position.set(e.tx, e.ty + e.th + (e.type === "component" ? 0.9 : 0.5), e.tz);
+      labelGroup.add(sp);
+      if (e.type === "component" && e.diff && (e.diff.added || e.diff.removed)) {
+        const badge = makeSprite(`+${e.diff.added} -${e.diff.removed}`, "#8b2e2e", 0.95);
+        badge.position.set(e.tx, e.ty + e.th + 1.9, e.tz);
+        badge.userData.bob = true;
+        labelGroup.add(badge);
+      }
+    }
+  }
+  let lastZoomBucket = 0;
+  function labelLOD() {
+    const bucket = camera.zoom < 2.2 ? 0 : camera.zoom < 4.5 ? 1 : 2;
+    if (bucket !== lastZoomBucket) { lastZoomBucket = bucket; refreshLabels(); }
+  }
+
+  // ---------- picking ----------
+  const ray = new T.Raycaster();
+  let down = null;
+  renderer.domElement.addEventListener("pointerdown", e => { down = { x: e.clientX, y: e.clientY }; });
+  renderer.domElement.addEventListener("pointerup", e => {
+    if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) { down = null; return; }
+    down = null;
+    const r = renderer.domElement.getBoundingClientRect();
+    ray.setFromCamera(new T.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+    const hit = ray.intersectObject(mesh)[0];
+    if (!hit) return;
+    const ent = entities[hit.instanceId];
+    if (!ent) return;
+    if (ent.type === "component") toggleComponent(ent.comp);
+    else if (ent.type === "file") toggleFile(ent.comp, ent.filePath);
+    else if (ent.type === "symbol") select({ type: "symbol", comp: ent.comp, filePath: ent.filePath, symIdx: ent.symIdx });
+  });
+
+  // ---------- expansion actions ----------
+  function toggleComponent(id) {
+    const s = byId[id];
+    if (!s.children || !s.children.files.length) { select({ type: "component", comp: id }); return; }
+    if (expanded.has(id)) {
+      expanded.delete(id);
+      for (const k of [...expandedFiles]) if (k.startsWith(id + "::")) expandedFiles.delete(k);
+    } else expanded.add(id);
+    select({ type: "component", comp: id });
+    rebuildEntities();
+    if (expanded.has(id)) flyTo(id, Math.max(camera.zoom, 2.6));
+    writeHash();
+  }
+  function toggleFile(comp, path) {
+    const key = comp + "::" + path;
+    expandedFiles.has(key) ? expandedFiles.delete(key) : expandedFiles.add(key);
+    select({ type: "file", comp, filePath: path });
+    rebuildEntities();
+    if (expandedFiles.has(key)) flyTo(comp, Math.max(camera.zoom, 4.8));
+    writeHash();
+  }
+
+  // ---------- selection panel ----------
+  const panel = document.getElementById("panel");
+  function select(sel) {
+    selected = sel;
+    document.querySelectorAll(".railitem").forEach(el => el.classList.toggle("sel", el.dataset.id === sel.comp));
+    const s = byId[sel.comp];
+    let title = s.name, zoneLabel = D.zones[s.zone].label + " · " + s.code, what = "", how = "";
+    let symIds = s.symbols || [];
+    if (sel.type === "file") {
+      title = sel.filePath;
+      const f = s.children.files.find(f => f.path === sel.filePath);
+      symIds = (f?.symbols || []).map(x => SYM[x.i]);
+      how = `${f?.loc ?? "?"} LOC · ${f?.symbols_total ?? "?"} symbols`;
+    } else if (sel.type === "symbol") {
+      const sid = SYM[sel.symIdx];
+      title = sid.split("::").pop();
+      symIds = [sid];
+      const f = s.children.files.find(f => f.path === sel.filePath);
+      const sm = f?.symbols.find(x => x.i === sel.symIdx);
+      how = sm ? `${sm.kind} · ${sm.loc} LOC · complexity ${sm.complexity ?? "n/a"} · ${sel.filePath}:${sm.line_start}` : "";
+    } else {
+      how = `${s.loc} LOC · ${s.symbols_total} symbols · zone ${s.zone}\n\n` + (s.symbols || []).slice(0, 25).join("\n");
+    }
+    const descs = symIds.map(sid => D.descriptions?.[sid]).filter(Boolean);
+    what = descs.length ? descs.map(d => d.body).join("\n\n") : (s.what || "No description yet — run the describe agent loop.");
+    const reasons = (D.reasons || []).filter(r => symIds.includes(r.symbol_id));
+    const diffHtml = sel.type === "component" && s.diff && (s.diff.added || s.diff.removed)
+      ? `<div class="diffbadge"><span class="add">+${s.diff.added}</span> <span class="del">-${s.diff.removed}</span> lines in this diff</div>` : "";
+    const reasonsHtml = reasons.length
+      ? `<div class="railhead">WHY (reasoning log)</div>` + reasons.map(r => `<div style="margin:.3rem 0">· ${r.why} <span style="opacity:.5">(${r.kind})</span></div>`).join("") : "";
+    panel.innerHTML = `
+      <div class="zone">${zoneLabel}</div>
+      <h2>${title}</h2>
+      ${diffHtml}
+      <div class="tabs"><button id="tb-what" class="on">what it does</button><button id="tb-how">how it's built</button></div>
+      <div class="body" id="tab-body"></div>
+      ${reasonsHtml}
+      <div class="railhead">TRACE</div>
+      <div id="tracelist"></div>`;
+    const body = panel.querySelector("#tab-body");
+    body.textContent = what;
+    panel.querySelector("#tb-what").onclick = () => { body.textContent = what; tab("what"); };
+    panel.querySelector("#tb-how").onclick = () => { body.textContent = how; tab("how"); };
+    function tab(which) {
+      panel.querySelector("#tb-what").classList.toggle("on", which === "what");
+      panel.querySelector("#tb-how").classList.toggle("on", which === "how");
+    }
+    renderTrace();
+  }
+  function renderTrace() {
+    const list = panel.querySelector("#tracelist");
+    if (!list) return;
+    list.innerHTML = D.trace.map((st, i) =>
+      `<div class="tracestep ${i === traceStep ? "on" : ""}" data-i="${i}">${i + 1}. ${byId[st.structure]?.name || st.structure} <span style="opacity:.55">${st.note}</span></div>`
+    ).join("");
+    list.querySelectorAll(".tracestep").forEach(el => el.onclick = () => setTrace(+el.dataset.i));
+  }
+  function setTrace(i) {
+    traceStep = i;
+    if (i >= 0) {
+      const s = byId[D.trace[i].structure];
+      if (s) { select({ type: "component", comp: s.id }); flyTo(s.id); }
+    }
+    renderTrace();
+    writeHash();
+  }
+
+  // ---------- camera fly ----------
+  let fly = null;
+  function flyTo(compId, zoomTo) {
+    const a = byId[compId]?._anchor;
+    if (!a) return;
+    fly = {
+      from: controls.target.clone(), to: new T.Vector3(a.x, 0, a.z),
+      z0: camera.zoom, z1: zoomTo ?? camera.zoom,
+      t0: performance.now(), dur: 550,
+    };
+  }
+  function updateFly(now) {
+    if (!fly) return;
+    const t = Math.min(1, (now - fly.t0) / fly.dur);
+    const e = t * t * (3 - 2 * t);
+    controls.target.lerpVectors(fly.from, fly.to, e);
+    camera.zoom = fly.z0 + (fly.z1 - fly.z0) * e;
+    camera.updateProjectionMatrix();
+    if (t >= 1) fly = null;
+  }
+
+  // ---------- hash state ----------
+  let applyingHash = false;
+  function writeHash() {
+    if (applyingHash) return;
+    const parts = [];
+    if (expanded.size) parts.push("inside=" + [...expanded].map(encodeURIComponent).join(","));
+    if (expandedFiles.size) parts.push("file=" + [...expandedFiles].map(encodeURIComponent).join(","));
+    if (traceStep >= 0) parts.push("trace=" + (traceStep + 1));
+    if (selected?.type === "symbol") parts.push("focus=" + encodeURIComponent(SYM[selected.symIdx]));
+    history.replaceState(null, "", parts.length ? "#" + parts.join("&") : location.pathname);
+  }
+  function applyHash() {
+    applyingHash = true;
+    const hash = new URLSearchParams(location.hash.slice(1));
+    expanded.clear(); expandedFiles.clear();
+    for (const id of (hash.get("inside") || "").split(",").filter(Boolean)) {
+      const dec = decodeURIComponent(id);
+      if (byId[dec]) expanded.add(dec);
+    }
+    for (const k of (hash.get("file") || "").split(",").filter(Boolean)) expandedFiles.add(decodeURIComponent(k));
+    const focus = hash.get("focus");
+    if (focus) {
+      const sid = decodeURIComponent(focus);
+      const i = SYM.indexOf(sid);
+      if (i >= 0) {
+        for (const s of D.structures) {
+          for (const f of s.children?.files || []) {
+            if (f.symbols.some(x => x.i === i)) {
+              expanded.add(s.id); expandedFiles.add(s.id + "::" + f.path);
+              rebuildEntities();
+              select({ type: "symbol", comp: s.id, filePath: f.path, symIdx: i });
+              flyTo(s.id);
+            }
+          }
+        }
+      }
+    }
+    rebuildEntities();
+    if (hash.get("trace")) setTrace(Math.min(D.trace.length - 1, Math.max(0, +hash.get("trace") - 1)));
+    else if (hash.get("inside") && !focus) {
+      const first = [...expanded][0];
+      if (first) { select({ type: "component", comp: first }); flyTo(first); }
+    }
+    applyingHash = false;
+  }
+  window.addEventListener("hashchange", applyHash);
+
+  // ---------- toolbar ----------
+  document.getElementById("btn-flow").onclick = e => {
+    flowing = !flowing;
+    e.target.textContent = flowing ? "pause flow" : "resume flow";
+  };
+  document.getElementById("btn-trace").onclick = () => setTrace((traceStep + 1) % D.trace.length);
+  document.getElementById("btn-collapse").onclick = () => {
+    expanded.clear(); expandedFiles.clear(); rebuildEntities(); writeHash();
+  };
+  document.getElementById("btn-reset").onclick = () => {
+    expanded.clear(); expandedFiles.clear(); traceStep = -1; selected = null;
+    rebuildEntities(); history.replaceState(null, "", location.pathname);
+    setCameraHome(); renderTrace();
+  };
+  function setCameraHome() {
+    camera.position.set(60, 60 * Math.tan(35.26 * Math.PI / 180) * 1.414, 60);
+    camera.zoom = 1.15;
+    camera.updateProjectionMatrix();
+    controls.target.set(0, 0, 0);
+    controls.update();
+  }
+
+  // ---------- boot + loop ----------
+  setCameraHome();
+  rebuildEntities();
+  applyHash();
+  let lastNow = performance.now(), firstFrame = true;
+  function frame(now) {
+    const dt = now - lastNow; lastNow = now;
+    updateFly(now);
+    controls.update();
+    updateInstances(now);
+    updateDots(dt);
+    labelLOD();
+    for (const sp of labelGroup.children) if (sp.userData.bob) sp.position.y += Math.sin(now / 400) * 0.004;
+    renderer.render(scene, camera);
+    if (firstFrame) { firstFrame = false; window.__CITY_READY = true; }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // test hooks: deterministic drive for Playwright
+  window.__city = {
+    expand: id => { if (!expanded.has(id)) toggleComponent(id); },
+    collapse: id => { if (expanded.has(id)) toggleComponent(id); },
+    expandFile: (comp, path) => { if (!expandedFiles.has(comp + "::" + path)) toggleFile(comp, path); },
+    setTrace,
+    select: id => select({ type: "component", comp: id }),
+    state: () => ({ expanded: [...expanded], files: [...expandedFiles], entities: entities.length }),
+  };
+})();
+</script>
+</body>
+</html>

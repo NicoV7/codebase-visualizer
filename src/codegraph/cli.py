@@ -143,19 +143,21 @@ def why(
 
 @app.command("export")
 def export_cmd(
-    fmt: str = typer.Option("graphjson", "--format", help="graphjson | isometric"),
+    fmt: str = typer.Option("graphjson", "--format", help="graphjson | isometric | 3d"),
     out: str = typer.Option(None, "--out"),
-    base: str = typer.Option(None, "--base", help="Include diff overlay vs this ref (isometric)"),
+    base: str = typer.Option(None, "--base", help="Include diff overlay vs this ref (isometric/3d)"),
     scrub: bool = typer.Option(False, "--scrub", help="Share-safety scrub of sensitive strings"),
     root: str = typer.Option(".", "--root"),
 ):
-    """Export the graph as JSON or a self-contained isometric HTML map."""
+    """Export the graph as JSON, a 2D isometric map, or the 3D city."""
     svc = _service(root)
     try:
         if fmt == "graphjson":
             path = svc.export_graphjson(out or ".codegraph/graph.json")
         elif fmt == "isometric":
             path = svc.export_isometric(out or ".codegraph/map.html", base=base, scrub=scrub)
+        elif fmt == "3d":
+            path = svc.export_city3d(out or ".codegraph/city.html", base=base, scrub=scrub)
         else:
             raise ValueError(f"unknown format {fmt!r}")
     except Exception as exc:
@@ -167,12 +169,16 @@ def export_cmd(
 def ui(
     root: str = typer.Option(".", "--root"),
     base: str = typer.Option(None, "--base"),
+    flat: bool = typer.Option(False, "--flat", help="Open the 2D isometric map instead of the 3D city"),
     no_open: bool = typer.Option(False, "--no-open"),
 ):
-    """Export the isometric map and open it in the browser."""
+    """Export the 3D city (or 2D map with --flat) and open it in the browser."""
     svc = _service(root)
     try:
-        path = svc.export_isometric(str(Path(root) / ".codegraph" / "map.html"), base=base)
+        if flat:
+            path = svc.export_isometric(str(Path(root) / ".codegraph" / "map.html"), base=base)
+        else:
+            path = svc.export_city3d(str(Path(root) / ".codegraph" / "city.html"), base=base)
     except Exception as exc:
         _fail(exc)
     typer.echo(path)
