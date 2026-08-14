@@ -169,16 +169,29 @@ def _code(component: str) -> str:
     return (base[:2] if len(base) >= 2 else base.ljust(2, "x")).upper()
 
 
-def _layout(ordered: list[str], zones: dict[str, str]) -> dict[str, tuple[int, int]]:
-    """Deterministic zone-banded grid: each zone owns a gy band, components fill gx slots."""
-    bands = {"entry": 0, "interface": 2, "core": 4, "storage": 6, "quality": 8, "external": 10}
+def _layout(
+    ordered: list[str], zones: dict[str, str], row_width: int = 8
+) -> dict[str, tuple[int, int]]:
+    """Deterministic zone-banded grid, wrapping into rows so large zones
+    stay compact instead of marching diagonally off-canvas."""
+    zone_order = ["entry", "interface", "core", "storage", "quality", "external"]
+    counts: dict[str, int] = defaultdict(int)
+    for comp in ordered:
+        counts[zones[comp]] += 1
+    band_start: dict[str, int] = {}
+    cursor = 0
+    for z in zone_order:
+        band_start[z] = cursor
+        rows = max(1, -(-counts[z] // row_width))
+        cursor += rows * 3 + 1
     counters: dict[str, int] = defaultdict(int)
     positions = {}
     for comp in ordered:
-        band = bands.get(zones[comp], 4)
-        slot = counters[zones[comp]]
-        counters[zones[comp]] += 1
-        positions[comp] = (slot * 3, band + (slot % 2))
+        zone = zones[comp]
+        slot = counters[zone]
+        counters[zone] += 1
+        col, row = slot % row_width, slot // row_width
+        positions[comp] = (col * 3, band_start.get(zone, 0) + row * 3)
     return positions
 
 

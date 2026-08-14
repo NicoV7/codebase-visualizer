@@ -7,6 +7,7 @@ between releases but `cgc query` JSON and `cgc index` are user-facing.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -63,8 +64,11 @@ class CgcAdapter:
                 f"`{self.cgc_bin}` not found on PATH; install with "
                 "`pip install codegraphcontext` or pass --cgc-bin"
             )
+        # cgc's console formatter wraps output at the detected terminal width,
+        # which injects literal newlines into long JSON strings — force it wide
+        env = {**os.environ, "COLUMNS": "100000"}
         proc = subprocess.run(
-            [binary, *args], capture_output=True, text=True, timeout=timeout
+            [binary, *args], capture_output=True, text=True, timeout=timeout, env=env
         )
         if proc.returncode != 0:
             raise EngineError(
@@ -83,7 +87,8 @@ class CgcAdapter:
         if start == -1:
             raise EngineError(f"cgc returned no JSON: {stdout.strip()[:300]!r}")
         try:
-            data = json.loads(stdout[start:])
+            # strict=False: cgc emits symbol source with literal control chars
+            data = json.loads(stdout[start:], strict=False)
         except json.JSONDecodeError as exc:
             raise EngineError(f"cgc returned unparseable JSON: {exc}") from exc
         return data if isinstance(data, list) else [data]

@@ -33,17 +33,31 @@ class CodeGraphService:
         return synthesize_library_nodes(self.engine.graph(self.project_root), self.project_root)
 
     def _symbol_hashes(self) -> dict[str, str]:
-        rows = self.engine.query(
-            "MATCH (f:Function) WHERE f.name <> '<module>' "
-            "RETURN f.name AS name, f.path AS path, f.source AS source"
-        )
+        # hash the file slice locally: cgc's JSON-encoded `source` field is
+        # unreliable (unescaped control chars / backslashes)
         from codegraph.model.ids import symbol_id
 
-        return {
-            symbol_id(r["path"], r["name"], repo_root=self.project_root): content_hash(r["source"] or "")
-            for r in rows
-            if r.get("path") and str(r["path"]).startswith(self.project_root)
-        }
+        rows = self.engine.query(
+            "MATCH (f:Function) WHERE f.name <> '<module>' "
+            "RETURN f.name AS name, f.path AS path, "
+            "f.line_number AS line_start, f.end_line AS line_end"
+        )
+        file_lines: dict[str, list[str]] = {}
+        hashes: dict[str, str] = {}
+        for r in rows:
+            path = r.get("path")
+            if not path or not str(path).startswith(self.project_root):
+                continue
+            if path not in file_lines:
+                try:
+                    file_lines[path] = Path(path).read_text(errors="replace").splitlines()
+                except OSError:
+                    file_lines[path] = []
+            lines = file_lines[path]
+            start, end = r.get("line_start") or 1, r.get("line_end") or 0
+            snippet = "\n".join(lines[start - 1 : end])
+            hashes[symbol_id(path, r["name"], repo_root=self.project_root)] = content_hash(snippet)
+        return hashes
 
     def trace(self, function_name: str, direction: str = "both", depth: int = 3) -> list[dict]:
         return self.engine.trace(function_name, direction=direction, depth=depth)

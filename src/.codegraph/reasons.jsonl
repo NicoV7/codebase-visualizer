@@ -1,0 +1,1 @@
+{"symbol_id": "codegraph/mcp/server.py::build_server", "why": "Tool names mirror codebase-memory-mcp so agent intuition transfers between engines", "kind": "exists", "source": "manual", "trace_id": null, "pr_number": null, "id": "0dc203185e6d", "created_at": "2026-08-14T17:19:59+00:00"}
