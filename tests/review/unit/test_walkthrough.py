@@ -98,6 +98,27 @@ class TestWalkthrough:
         assert snippet["total"] == 150
         assert snippet["truncated"] is True
 
+    def test_chains_stay_contiguous_across_multiple_roots(self, tmp_path):
+        # Arrange: a second, sort-earlier root that must NOT interleave into main's chain
+        graph = _graph(tmp_path)
+        lone = tmp_path / "cli" / "aux.py"
+        lone.write_text("aux\n" * 10)
+        graph.nodes.append(Node(id="cli/aux.py::standalone", kind="function", name="standalone",
+                                path=str(lone), line_start=1, line_end=5))
+        # Act
+        wt = build_walkthrough(
+            graph, str(tmp_path),
+            _diff("cli/main.py::main", "core/logic.py::apply", "core/logic.py::helper",
+                  "cli/aux.py::standalone"),
+            {}, [], {}, scope="diff",
+        )
+        # Assert: each root's full chain runs before the next root starts
+        order = [s["symbol_id"] for s in wt["stops"] if s["kind"] == "changed"]
+        assert order == [
+            "cli/aux.py::standalone",
+            "cli/main.py::main", "core/logic.py::apply", "core/logic.py::helper",
+        ]
+
     def test_trace_path_runs_entry_to_stop_with_files_and_lines(self, tmp_path):
         # Act
         wt = build_walkthrough(

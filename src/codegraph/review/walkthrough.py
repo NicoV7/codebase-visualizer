@@ -96,28 +96,39 @@ def _sort_key(sid: str, nodes: dict, project_root: str):
 
 
 def _execution_order(changed: set, callers_of: dict, callees_of: dict, nodes: dict, project_root: str) -> list[str]:
-    """Kahn topo over calls edges within the changed set; deterministic;
-    cycles broken by removing the minimal node by sort key."""
-    indegree = {sid: 0 for sid in changed}
-    for sid in changed:
-        for callee in callees_of[sid]:
-            if callee in changed and callee != sid:
-                indegree[callee] += 1
-    remaining = set(changed)
+    """Depth-first chains from entry-first roots, deterministic.
+
+    Each root is followed down its whole call chain before the next root
+    starts, so a capped tour keeps complete stories — breadth-first fronted
+    every uncalled symbol and the cap sliced off all the depth."""
+    def key(sid: str):
+        return _sort_key(sid, nodes, project_root)
+
+    roots = sorted(
+        (s for s in changed if not any(c in changed and c != s for c in callers_of[s])),
+        key=key,
+    )
     ordered: list[str] = []
-    while remaining:
-        ready = sorted(
-            (sid for sid in remaining if indegree[sid] == 0),
-            key=lambda sid: _sort_key(sid, nodes, project_root),
-        )
-        if not ready:  # cycle: evict the minimal node so progress is deterministic
-            ready = [min(remaining, key=lambda sid: _sort_key(sid, nodes, project_root))]
-        sid = ready[0]
-        remaining.discard(sid)
-        ordered.append(sid)
-        for callee in callees_of[sid]:
-            if callee in remaining:
-                indegree[callee] = max(0, indegree[callee] - 1)
+    visited: set[str] = set()
+
+    def dfs(start: str) -> None:
+        stack = [start]
+        while stack:
+            sid = stack.pop()
+            if sid in visited:
+                continue
+            visited.add(sid)
+            ordered.append(sid)
+            children = sorted(
+                {c for c in callees_of[sid] if c in changed and c not in visited},
+                key=key, reverse=True,
+            )
+            stack.extend(children)  # reversed: smallest-key callee pops first
+
+    for root in roots:
+        dfs(root)
+    while len(visited) < len(changed):  # cycle islands have no root
+        dfs(min((s for s in changed if s not in visited), key=key))
     return ordered
 
 
