@@ -125,6 +125,14 @@ class TestReviewMode:
                 page.wait_for_timeout(500)
                 assert page.evaluate("window.__city.reviewState()")["stop"] == 2
                 assert page.evaluate("window.__city.understandingOf('core/logic.py::apply')") == "walked"
+                # the route is visible and every hop has a station
+                trace = page.evaluate("window.__city.tracePath()")
+                assert trace["visible"] and trace["hops"] >= 2
+                assert trace["stations"] == trace["hops"]
+                # reset clears the route
+                page.click("#btn-reset")
+                page.wait_for_timeout(200)
+                assert page.evaluate("window.__city.tracePath()")["visible"] is False
                 assert page.evaluate("window.__city.percentUnderstood()") > 0
                 ledger = (tmp_path / ".codegraph" / "understanding.jsonl").read_text()
                 assert "core/logic.py::apply" in ledger

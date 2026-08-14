@@ -98,6 +98,29 @@ class TestWalkthrough:
         assert snippet["total"] == 150
         assert snippet["truncated"] is True
 
+    def test_trace_path_runs_entry_to_stop_with_files_and_lines(self, tmp_path):
+        # Act
+        wt = build_walkthrough(
+            _graph(tmp_path), str(tmp_path), _diff("core/logic.py::helper"),
+            {}, [], {}, scope="diff",
+        )
+        # Assert: entry (main) -> apply -> helper, each hop mapped to file:line
+        stop = wt["stops"][0]
+        hops = stop["trace_path"]
+        assert [h["symbol_id"] for h in hops] == [
+            "cli/main.py::main", "core/logic.py::apply", "core/logic.py::helper",
+        ]
+        assert hops[0]["file"] == "cli/main.py" and hops[0]["line"] == 1
+        assert hops[2]["file"] == "core/logic.py" and hops[2]["line"] == 35
+        assert stop["trace_path_total"] == 3
+
+    def test_symbol_without_callers_is_its_own_path(self, tmp_path):
+        wt = build_walkthrough(
+            _graph(tmp_path), str(tmp_path), _diff("cli/main.py::main"),
+            {}, [], {}, scope="diff",
+        )
+        assert [h["symbol_id"] for h in wt["stops"][0]["trace_path"]] == ["cli/main.py::main"]
+
     def test_reasons_and_understanding_ride_on_stops(self, tmp_path):
         wt = build_walkthrough(
             _graph(tmp_path), str(tmp_path), _diff("core/logic.py::apply"),

@@ -22,6 +22,7 @@ MAX_STOPS_CONTEXT = 40
 MAX_SNIPPET_LINES = 80
 MAX_HUNKS_PER_STOP = 5
 MAX_NEIGHBORS = 15
+MAX_TRACE_HOPS = 12
 
 _ZONE_ORDER = ["entry", "interface", "core", "storage", "quality", "external"]
 
@@ -137,6 +138,51 @@ def _snippet(node: Any) -> dict[str, Any]:
     }
 
 
+def _trace_path(sid: str, callers_of: dict, nodes: dict, project_root: str) -> list[dict[str, Any]]:
+    """Shortest caller chain from an entry point down to `sid`, entry first.
+
+    BFS backwards over callers; a hop in the entry zone (or with no callers)
+    is a root. Deterministic: callers explored in _sort_key order."""
+    def _is_root(s: str) -> bool:
+        node = nodes[s]
+        comp = (component_of(node.path, project_root) if node.path else None) or "~"
+        return _zone(comp) == "entry" or not callers_of[s]
+
+    parent: dict[str, str | None] = {sid: None}
+    queue, root = [sid], None
+    while queue and root is None:
+        current = queue.pop(0)
+        if _is_root(current):
+            root = current
+            break
+        for caller in sorted(set(callers_of[current]), key=lambda s: _sort_key(s, nodes, project_root)):
+            if caller in nodes and caller not in parent:
+                parent[caller] = current
+                queue.append(caller)
+    if root is None:  # unreachable roots (cycle island): the symbol is its own path
+        root = sid
+    chain = []
+    cursor: str | None = root
+    while cursor is not None:
+        chain.append(cursor)
+        cursor = parent.get(cursor)
+    hops = []
+    for s in chain:
+        node = nodes[s]
+        try:
+            rel = Path(node.path).relative_to(project_root).as_posix() if node.path else "?"
+        except ValueError:
+            rel = node.path or "?"
+        hops.append({
+            "symbol_id": s,
+            "name": node.name,
+            "component": (component_of(node.path, project_root) if node.path else None) or "?",
+            "file": rel,
+            "line": node.line_start,
+        })
+    return hops
+
+
 def _stop(sid, kind, nodes, diff_by_sid, descriptions, reasons, understanding,
           callers_of, callees_of, project_root) -> dict[str, Any]:
     node = nodes[sid]
@@ -170,6 +216,8 @@ def _stop(sid, kind, nodes, diff_by_sid, descriptions, reasons, understanding,
             {"why": r.why, "kind": r.kind, "source": r.source, "created_at": r.created_at}
             for r in reasons if r.symbol_id == sid
         ],
+        "trace_path": (tp := _trace_path(sid, callers_of, nodes, project_root))[:MAX_TRACE_HOPS],
+        "trace_path_total": len(tp),
         "callers": neighbors(callers_of[sid]),
         "callers_total": len(set(callers_of[sid])),
         "callees": neighbors(callees_of[sid]),
